@@ -8,11 +8,8 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
 
-from pydantic import BaseModel
-
-from serial_studio.gateway import Gateway, role_model
+from serial_studio.gateway import Gateway, role_model, strict_schema
 from serial_studio.schemas import (
     ArchitectInput,
     Bible,
@@ -23,6 +20,7 @@ from serial_studio.schemas import (
     ModelRequest,
     OpenThread,
     Scene,
+    SeasonPlan,
     SourcePosition,
 )
 
@@ -62,24 +60,6 @@ Return only what THIS scene adds or changes:
 - opened_threads: questions this scene leaves the listener asking (id snake_case).
 - closed_threads: ids of existing open threads this scene answers.
 Use empty lists when the scene adds nothing to a field."""
-
-
-def strict_schema(model: type[BaseModel]) -> dict[str, Any]:
-    """JSON schema for constrained decoding: every field required, no defaults."""
-
-    def walk(node: Any) -> Any:
-        if isinstance(node, dict):
-            node = {k: walk(v) for k, v in node.items() if k not in ("default", "title")}
-            if node.get("type") == "object" and "properties" in node:
-                node["required"] = list(node["properties"])
-                node["additionalProperties"] = False
-            return node
-        if isinstance(node, list):
-            return [walk(v) for v in node]
-        return node
-
-    result: dict[str, Any] = walk(model.model_json_schema())
-    return result
 
 
 DELTA_SCHEMA = strict_schema(BibleDelta)
@@ -142,10 +122,15 @@ def _union(old: list[str], new: list[str], exclude: str = "") -> list[str]:
     return out
 
 
-def locate(quote: str, scene: Scene) -> SourcePosition:
-    """Offset of the quote in the story, tolerant of quote marks and punctuation."""
+def find_quote(quote: str, text: str) -> re.Match[str] | None:
+    """First match of the quote's words in text, tolerant of quote marks and punctuation."""
     words = re.findall(r"\w+", quote)
-    m = re.search(r"\W+".join(map(re.escape, words)), scene.text, re.I) if words else None
+    return re.search(r"\W+".join(map(re.escape, words)), text, re.I) if words else None
+
+
+def locate(quote: str, scene: Scene) -> SourcePosition:
+    """Offset of the quote in the story."""
+    m = find_quote(quote, scene.text)
     if m is None:
         return SourcePosition(scene=scene.index, offset=scene.start, quote=quote, exact=False)
     return SourcePosition(scene=scene.index, offset=scene.start + m.start(), quote=m.group(), exact=True)
@@ -221,4 +206,19 @@ def finalize(bible: Bible) -> Bible:
         if real:
             c.aliases = _union([c.name], [a for a in c.aliases if a != real], exclude=real)
             c.name = real
+    return b
+
+
+def cast(bible: Bible, plan: SeasonPlan) -> Bible:
+    """Write the approved season plan's decisions into the bible: voices and clue episodes."""
+    b = bible.model_copy(deep=True)
+    b.narrator_voice_id = plan.casting["narrator"]
+    for c in b.characters:
+        c.voice_id = plan.casting.get(c.name)
+    clues = {c.id: c for c in b.clues}
+    for e in plan.episodes:
+        for cid in (cid for beat in e.beats for cid in beat.clue_ids):
+            clues[cid].assigned_episode = e.episode
+        for cid in e.reveals:
+            clues[cid].reveal_episode = e.episode
     return b

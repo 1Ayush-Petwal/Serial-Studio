@@ -22,7 +22,7 @@ from langfuse import Langfuse
 
 from serial_studio import db
 from serial_studio.graph import Runner
-from serial_studio.schemas import Bible, Decision, RunStatus, StartRun
+from serial_studio.schemas import Bible, Decision, RunStatus, SeasonPlan, StartRun
 
 
 def show(status: RunStatus) -> None:
@@ -56,6 +56,24 @@ def show(status: RunStatus) -> None:
         print("OPEN THREADS")
         for t in b.open_threads:
             print(f"  [{t.id}] {'closed' if t.closed else 'open'}: {t.question}")
+    elif status.gate.gate == 2:
+        plan = SeasonPlan.model_validate(status.gate.payload["plan"])
+        for e in plan.episodes:
+            print(f'EPISODE {e.episode}: {e.title}  (from char {e.start}: "{e.starts_at}")')
+            if e.recap:
+                print(f"  recap: {e.recap}")
+            for k in e.listener_knows:
+                print(f"  knows: {k}")
+            for beat in e.beats:
+                clues = f"  [plants {', '.join(beat.clue_ids)}]" if beat.clue_ids else ""
+                print(f"  {beat.kind}: {beat.summary}{clues}")
+            if e.cliffhanger:
+                print(f"  cliffhanger event: {e.cliffhanger.event}  (keywords: {', '.join(e.cliffhanger.keywords)})")
+            if e.reveals:
+                print(f"  reveals: {', '.join(e.reveals)}")
+        print("CASTING")
+        for name, voice in plan.casting.items():
+            print(f"  {name}: {voice}")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -82,7 +100,8 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     langfuse = Langfuse()
-    http = httpx.Client(timeout=httpx.Timeout(300, connect=30), follow_redirects=True)
+    # Free-tier Gemini can queue a long planning call for many minutes before answering.
+    http = httpx.Client(timeout=httpx.Timeout(900, connect=30), follow_redirects=True)
     runner = Runner(os.environ["DATABASE_URL"], http, langfuse)
     try:
         if args.cmd == "run":

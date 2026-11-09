@@ -20,10 +20,21 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 from pydantic import BaseModel
 
-from serial_studio import db, schemas, story_architect
+from serial_studio import beat_planner, db, schemas, story_architect
 from serial_studio.gateway import Gateway
 from serial_studio.ingest import ingest, scenes
-from serial_studio.schemas import ArchitectInput, Bible, Decision, GatePayload, RunStatus, Scene, StartRun, Story
+from serial_studio.schemas import (
+    ArchitectInput,
+    Bible,
+    Decision,
+    GatePayload,
+    PlannerInput,
+    RunStatus,
+    Scene,
+    SeasonPlan,
+    StartRun,
+    Story,
+)
 
 
 class RunState(BaseModel):
@@ -33,8 +44,11 @@ class RunState(BaseModel):
     scenes: list[Scene] = []
     scene_index: int = 0
     bible: Bible | None = None
-    notes: str | None = None
-    approved: bool = False
+    notes: str | None = None  # gate-1 notes for the Story Architect
+    bible_approved: bool = False
+    plan: SeasonPlan | None = None
+    plan_notes: str | None = None  # gate-2 notes for the Beat Planner
+    plan_approved: bool = False
 
 
 def gate(conn: psycopg.Connection[Any], payload: GatePayload) -> Decision:
@@ -74,28 +88,61 @@ def build(conn: psycopg.Connection[Any], gateway: Gateway) -> StateGraph[RunStat
         )
         decision = gate(conn, payload)
         if decision.verdict == "approve":
-            return {"approved": True}
+            return {"bible_approved": True}
         # Reject: the Story Architect re-extracts from scratch with the editor's notes. Earlier notes
         # are kept: extraction is sampled, so a fresh pass can drop what a previous note fixed.
         notes = "\n".join(n for n in (s.notes, decision.notes) if n)
         return {"notes": notes, "scene_index": 0, "bible": Bible(story_id=s.bible.story_id)}
 
+    def beat_planner_node(s: RunState) -> dict[str, Any]:
+        assert s.story is not None and s.bible is not None
+        inp = PlannerInput(story=s.story, bible=s.bible, notes=s.plan_notes)
+        version = s.plan.version + 1 if s.plan else 1
+        return {"plan": beat_planner.plan(gateway, s.run_id, inp, version)}
+
+    def gate_2_node(s: RunState) -> dict[str, Any]:
+        assert s.plan is not None
+        payload = GatePayload(
+            gate=2,
+            run_id=s.run_id,
+            target=f"season-plan:{s.plan.story_id}:v{s.plan.version}",
+            payload={"plan": s.plan.model_dump()},
+        )
+        decision = gate(conn, payload)
+        if decision.verdict == "approve":
+            return {"plan_approved": True}
+        return {"plan_notes": "\n".join(n for n in (s.plan_notes, decision.notes) if n)}
+
+    def cast_node(s: RunState) -> dict[str, Any]:
+        # The approved casting and clue episodes become a new bible version (one writer of truth).
+        assert s.bible is not None and s.plan is not None
+        return {"bible": db.save_bible(conn, story_architect.cast(s.bible, s.plan))}
+
     def after_architect(s: RunState) -> Literal["story_architect", "save_bible"]:
         return "story_architect" if s.scene_index < len(s.scenes) else "save_bible"
 
-    def after_gate_1(s: RunState) -> str:
-        return END if s.approved else "story_architect"
+    def after_gate_1(s: RunState) -> Literal["beat_planner", "story_architect"]:
+        return "beat_planner" if s.bible_approved else "story_architect"
+
+    def after_gate_2(s: RunState) -> Literal["cast", "beat_planner"]:
+        return "cast" if s.plan_approved else "beat_planner"
 
     g = StateGraph(RunState)
     g.add_node("ingest", ingest_node)
     g.add_node("story_architect", architect_node)
     g.add_node("save_bible", save_bible_node)
     g.add_node("gate_1", gate_1_node)
+    g.add_node("beat_planner", beat_planner_node)
+    g.add_node("gate_2", gate_2_node)
+    g.add_node("cast", cast_node)
     g.add_edge(START, "ingest")
     g.add_edge("ingest", "story_architect")
     g.add_conditional_edges("story_architect", after_architect)
     g.add_edge("save_bible", "gate_1")
     g.add_conditional_edges("gate_1", after_gate_1)
+    g.add_edge("beat_planner", "gate_2")
+    g.add_conditional_edges("gate_2", after_gate_2)
+    g.add_edge("cast", END)
     return g
 
 
@@ -106,8 +153,10 @@ class Runner:
         self, database_url: str, http: httpx.Client, langfuse: Langfuse, gateway_class: type[Gateway] = Gateway
     ) -> None:
         self.conn = db.connect(database_url)
+
         # The checkpointer pipelines its writes, so it gets a connection of its own.
         self._checkpoint_conn = db.connect(database_url)
+
         # Strict allowlist: checkpoints may only rebuild our own schema types.
         allowed = [t for t in vars(schemas).values() if isinstance(t, type) and issubclass(t, BaseModel)]
         checkpointer = PostgresSaver(self._checkpoint_conn, serde=JsonPlusSerializer(allowed_msgpack_modules=allowed))

@@ -15,6 +15,15 @@ Keyword = Annotated[str, StringConstraints(strip_whitespace=True, to_lower=True,
 Keywords = Annotated[list[Keyword], Field(min_length=2, max_length=4)]
 
 
+# Kokoro-82M English built-ins (decision 27): a/b = American/British, f/m = female/male.
+VoiceId = Literal[
+    "af_heart", "af_alloy", "af_aoede", "af_bella", "af_jessica", "af_kore", "af_nicole", "af_nova",
+    "af_river", "af_sarah", "af_sky", "am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam",
+    "am_michael", "am_onyx", "am_puck", "am_santa", "bf_alice", "bf_emma", "bf_isabella", "bf_lily",
+    "bm_daniel", "bm_fable", "bm_george", "bm_lewis",
+]  # fmt: skip
+
+
 class Schema(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -75,7 +84,7 @@ class CharacterDelta(Schema):
 
 
 class Character(CharacterDelta):
-    voice_id: str | None = None  # chosen at gate 2
+    voice_id: VoiceId | None = None  # chosen at gate 2
 
 
 class ClueDelta(Schema):
@@ -126,6 +135,7 @@ class Bible(Schema):
     pronunciations: list[Pronunciation] = []
     clues: list[Clue] = []
     open_threads: list[OpenThread] = []
+    narrator_voice_id: VoiceId | None = None  # chosen at gate 2
 
 
 class ArchitectInput(Schema):
@@ -218,34 +228,67 @@ class CostLine(Schema):
     cache_hit: bool
 
 
-# --- Later slices (defined now so hand-offs are fixed before the code) -----------
+# --- Season plan and casting ----------------------------------------------------
 
 
 class Beat(Schema):
-    kind: Literal["hook", "turn", "cliffhanger"]
+    kind: Literal["hook", "turn", "cliffhanger", "resolution"]  # resolution ends the last episode
     summary: NonEmpty
-    clue_ids: list[str] = []
+    clue_ids: list[str]  # clues planted in this beat
 
 
 class Cliffhanger(Schema):
-    event: NonEmpty
-    keywords: Keywords
+    event: NonEmpty  # something that happens, is heard or is said; not a question
+    keywords: Keywords  # ep N+1's opening must hit these (decision 25)
 
 
-class BeatSheet(Schema):
+class EpisodeDraft(Schema):
+    """One episode as the Beat Planner writes it."""
+
     episode: int
+    title: NonEmpty
+    starts_at: NonEmpty  # opening words of the story passage this episode adapts, verbatim
+    listener_knows: list[NonEmpty]  # state at the start of the episode
+    recap: str | None  # one narrator line, required from episode 2 on
     beats: Annotated[list[Beat], Field(min_length=3, max_length=5)]
-    cliffhanger: Cliffhanger
-    recap: str | None = None  # required from episode 2 on (validator)
-    listener_knows: list[str]  # state at the start of the episode
-    previous_cliffhanger: Cliffhanger | None = None
+    cliffhanger: Cliffhanger | None  # every episode but the last
+    reveals: list[str]  # clues whose meaning this episode explains
+
+
+class CastingChoice(Schema):
+    character: NonEmpty  # canonical bible name
+    voice_id: VoiceId
+    why: NonEmpty
+
+
+class PlanDraft(Schema):
+    """Beat Planner output: the season, then casting."""
+
+    episodes: Annotated[list[EpisodeDraft], Field(min_length=5, max_length=7)]
+    narrator_voice: VoiceId
+    casting: list[CastingChoice]
+
+
+class PlannerInput(Schema):
+    story: Story
+    bible: Bible  # the version approved at gate 1
+    notes: str | None = None  # editor's notes from gate-2 rejections
+
+
+class BeatSheet(EpisodeDraft):
+    start: int  # char offset of starts_at in Story.text; the episode runs to the next one's start
+    previous_cliffhanger: Cliffhanger | None = None  # the seam ep N+1 must pick up
 
 
 class SeasonPlan(Schema):
     story_id: NonEmpty
     bible_version: int
+    version: int  # attempt number within the run; gate-2 target
     episodes: Annotated[list[BeatSheet], Field(min_length=5, max_length=7)]
-    casting: dict[str, str]  # character name (or "narrator") -> voice id
+    casting: dict[str, VoiceId]  # canonical character name, or "narrator" -> voice
+
+
+# --- Later slices (defined now so hand-offs are fixed before the code) -----------
 
 
 class ClueSpan(Schema):
