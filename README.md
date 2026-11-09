@@ -15,11 +15,18 @@ docker compose up -d        # local Postgres + pgvector (tests use it)
 
 ```sh
 uv run serial-studio run "The Speckled Band" --book 1661   # ingest + Story Architect, pauses at gate 1
+uv run serial-studio run "The Red-Headed League" --book 1661   # other demo stories
+uv run serial-studio run "Silver Blaze" --book 834
 uv run serial-studio show RUN_ID                           # review what the open gate is waiting on
 uv run serial-studio approve RUN_ID                        # gate 1 -> Beat Planner, pauses at gate 2
 uv run serial-studio reject RUN_ID --notes "..."           # re-runs the gate's agent with the notes
 uv run serial-studio resume RUN_ID                         # continue a crashed run from its last node
 ```
+
+Ingest cuts the story out of the anthology by its heading, then looks for other Gutenberg copies
+(Gutendex searches on the book's and the story's title): MinHash over 5-word shingles, Jaccard >= 0.8
+means the same story. The cleanest copy (fewest markup artefacts, then lowest book id) becomes the text;
+every copy is kept as `Story.lineage`.
 
 Gates: 1 = bible and clue ledger (Story Architect), 2 = season plan and casting (Beat Planner).
 Approving gate 2 writes the voices and each clue's plant/reveal episode into a new bible version.
@@ -41,6 +48,6 @@ uv run pytest               # needs the docker-compose Postgres; no network, no 
 uv run ruff check . && uv run mypy
 ```
 
-Tests replay `tests/fixtures/speckled_band.jsonl`, an export of a real run's gateway cache.
+Tests replay `tests/fixtures/recordings.jsonl`, an export of a real run's gateway cache.
 After changing a prompt, re-record: run the pipeline for real, then
-`uv run serial-studio export-recordings tests/fixtures/speckled_band.jsonl`.
+`uv run serial-studio export-recordings tests/fixtures/recordings.jsonl`.

@@ -77,6 +77,8 @@ class Gateway:
         if (hit := db.cache_get(self.conn, key)) is not None:
             return str(hit["body"])
         body = self._send("GET", url).text
+        if not body.strip():  # Gutendex sometimes answers 200 with nothing; never cache that
+            raise GatewayError(f"GET {url} returned an empty body")
         db.cache_put(self.conn, key, "http", request, {"body": body})
         return body
 

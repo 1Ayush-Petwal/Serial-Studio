@@ -36,13 +36,23 @@ class StartRun(Schema):
     book_id: Annotated[int, Field(gt=0)]  # Gutenberg book that contains the story
 
 
+class Copy(Schema):
+    """One Gutenberg copy of a story."""
+
+    book_id: int
+    source_url: str
+    similarity: float  # MinHash Jaccard estimate vs the copy in the requested book; >= 0.8 = same story
+    noise: float  # markup artefacts per 1,000 words (illustrations, footnotes, stray symbols); lower = cleaner
+
+
 class Story(Schema):
     id: NonEmpty  # slug of the title
     title: NonEmpty
     author: str
-    book_id: int
+    book_id: int  # the canonical copy's book
     source_url: str
     text: NonEmpty  # cleaned prose, paragraphs separated by one blank line
+    lineage: list[Copy] = []  # every copy found, cleanest first (noise, then book id); [0] is canonical
 
 
 class Scene(Schema):

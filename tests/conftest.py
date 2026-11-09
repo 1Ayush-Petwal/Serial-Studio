@@ -1,7 +1,7 @@
 """Graph-runner seam harness.
 
 Each test gets an empty Postgres database and a fake network that replays the
-recorded gateway cache (tests/fixtures/speckled_band.jsonl, written by
+recorded gateway cache (tests/fixtures/recordings.jsonl, written by
 `serial-studio export-recordings`). Anything unrecorded fails the request, so
 the suite never touches the real network.
 """
@@ -25,7 +25,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from serial_studio.gateway import Gateway
 from serial_studio.graph import Runner
 
-RECORDINGS = Path(__file__).parent / "fixtures" / "speckled_band.jsonl"
+RECORDINGS = Path(__file__).parent / "fixtures" / "recordings.jsonl"
 ADMIN_URL = os.environ.get("TEST_DATABASE_URL", "postgresql://serial:serial@localhost:54329/postgres")
 
 
