@@ -94,8 +94,10 @@ def network() -> FakeNetwork:
 
 @pytest.fixture
 def make_app(database_url: str, network: FakeNetwork, monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[..., App]]:
-    monkeypatch.delenv("JUDGE_MODEL", raising=False)
+    for role in ("JUDGE_MODEL", "WRITER_MODEL"):
+        monkeypatch.delenv(role, raising=False)
     monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     apps: list[App] = []
 
     def make(gateway_class: type[Gateway] = Gateway) -> App:

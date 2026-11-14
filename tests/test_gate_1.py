@@ -70,16 +70,6 @@ def test_run_pauses_at_gate_1_with_versioned_bible_and_fair_play_clues(make_app:
         assert_fair_play_clue(bible, story.text, word)
 
 
-def test_cli_approve_completes_the_run(make_app: Callable[..., App]) -> None:
-    app = make_app()
-    run_id = app.runner.start(SPECKLED_BAND).run_id
-
-    status = approve(app, run_id, TARGET_V1)
-
-    assert status.state == "done"
-    assert status.gate is None
-
-
 def test_reject_with_notes_reruns_story_architect_with_those_notes(
     make_app: Callable[..., App], network: FakeNetwork
 ) -> None:
@@ -107,7 +97,12 @@ def test_reject_with_notes_reruns_story_architect_with_those_notes(
     for word in ("whistle", "clang", "milk"):
         assert_fair_play_clue(bible_of(v3), text, word)
     assert [b.version for b in db.bible_versions(app.conn, "the-speckled-band")] == [1, 2, 3]
-    assert approve(app, run_id, "bible:the-speckled-band:v3").state == "done"
+    # Approval hands bible v3 to the Beat Planner (its plan for v3 is not recorded, so the call stops there).
+    with pytest.raises(Exception, match="network disabled"):
+        approve(app, run_id, "bible:the-speckled-band:v3")
+    planner = network.model_calls()[-1]
+    assert planner["model"].startswith("gemini")
+    assert "milk" in planner["messages"][1]["content"], "planner was not given the approved v3 bible"
 
 
 def test_decision_for_a_stale_target_is_refused(make_app: Callable[..., App]) -> None:

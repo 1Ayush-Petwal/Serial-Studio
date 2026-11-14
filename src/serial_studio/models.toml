@@ -30,11 +30,13 @@ input_per_mtok = 0.29
 output_per_mtok = 0.59
 json_schema = false
 
-[models."gemini:gemini-2.5-flash"]
-input_per_mtok = 0.30
-output_per_mtok = 2.50
-json_schema = false
+# 2.5 Flash is closed to new AI Studio projects (404). Launch price through 2026-12-31;
+# 1.50 / 7.50 from 2027-01-01.
+[models."gemini:gemini-3.8-flash"]
+input_per_mtok = 0.75
+output_per_mtok = 3.75
+json_schema = false  # strict schemas past a size limit 400 "invalid argument"; JSON mode instead
 
 [roles]
 judge = "groq:openai/gpt-oss-120b"
-writer = "gemini:gemini-2.5-flash"
+writer = "gemini:gemini-3.8-flash"

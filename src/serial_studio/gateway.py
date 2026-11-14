@@ -18,6 +18,7 @@ from typing import Any
 import httpx
 import psycopg
 from langfuse import Langfuse, propagate_attributes
+from pydantic import BaseModel
 
 from serial_studio import db
 from serial_studio.schemas import CostLine, ModelRef, ModelRequest, ModelResponse
@@ -36,6 +37,27 @@ def role_model(role: str) -> ModelRef:
     if ref not in REGISTRY["models"]:
         raise GatewayError(f"{ref!r} has no entry in models.toml (needed for list price)")
     return ModelRef.parse(ref)
+
+
+def strict_schema(model: type[BaseModel]) -> dict[str, Any]:
+    """JSON schema for constrained decoding: every field required, no defaults."""
+
+    def walk(node: Any) -> Any:
+        if isinstance(node, dict):
+            props = {k: walk(v) for k, v in node.get("properties", {}).items()}  # field names are kept as-is
+            node = {k: walk(v) for k, v in node.items() if k not in ("default", "title", "properties")}
+            if props:
+                node["properties"] = props
+            if node.get("type") == "object" and "properties" in node:
+                node["required"] = list(node["properties"])
+                node["additionalProperties"] = False
+            return node
+        if isinstance(node, list):
+            return [walk(v) for v in node]
+        return node
+
+    result: dict[str, Any] = walk(model.model_json_schema())
+    return result
 
 
 def _key(request: dict[str, Any]) -> str:
@@ -65,15 +87,24 @@ class Gateway:
             "messages": [m.model_dump() for m in req.messages],
             **req.params,
         }
-        if req.response_schema is not None:
-            body["response_format"] = (
-                {
-                    "type": "json_schema",
-                    "json_schema": {"name": "output", "schema": req.response_schema, "strict": True},
-                }
-                if spec["json_schema"]
-                else {"type": "json_object"}
-            )
+        if req.response_schema is not None and spec["json_schema"]:
+            body["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": "output", "schema": req.response_schema, "strict": True},
+            }
+        elif req.response_schema is not None:
+            # No constrained decoding (Gemini 400s on schemas past an unpublished complexity limit):
+            # JSON mode with the schema in the system prompt; the caller validates the answer.
+            body["response_format"] = {"type": "json_object"}
+            schema_note = "Reply with one JSON object matching this JSON schema:\n" + json.dumps(req.response_schema)
+            first = body["messages"][0]
+            if first["role"] == "system":
+                body["messages"] = [
+                    {**first, "content": first["content"] + "\n\n" + schema_note},
+                    *body["messages"][1:],
+                ]
+            else:
+                body["messages"] = [{"role": "system", "content": schema_note}, *body["messages"]]
         request = {"kind": "model", "provider": req.model.provider, "body": body, "prompt_version": req.prompt_version}
         key = _key(request)
 
@@ -137,7 +168,14 @@ class Gateway:
     def _send(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         """Retry rate limits and server errors; anything else fails loudly."""
         for attempt in range(8):
-            r = self.http.request(method, url, **kwargs)
+            try:
+                r = self.http.request(method, url, **kwargs)
+            except (httpx.ReadTimeout, httpx.RemoteProtocolError):
+                # Free-tier Gemini drops or stalls long calls; same treatment as a 5xx.
+                if attempt == 7:
+                    raise
+                time.sleep(2**attempt)
+                continue
             # Groq validates structured output after generating it (best-effort, not constrained),
             # so a schema miss is a 400 worth a couple of fresh samples.
             if r.status_code == 400 and "json_validate_failed" in r.text and attempt < 2:
