@@ -1,0 +1,40 @@
+# Model registry: providers, list prices (USD per 1M tokens) and role defaults.
+# Swap a role by editing [roles] or setting the env var, e.g. JUDGE_MODEL="groq:llama-3.3-70b-versatile".
+# Prices are public list prices used for the shadow cost (decision 35), checked 2026-11-08.
+
+[providers.groq]
+base_url = "https://api.groq.com/openai/v1"
+key_env = "GROQ_API_KEY"
+
+[providers.gemini]
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+key_env = "GEMINI_API_KEY"
+
+[models."groq:openai/gpt-oss-120b"]
+input_per_mtok = 0.15
+output_per_mtok = 0.60
+json_schema = true
+
+[models."groq:openai/gpt-oss-20b"]
+input_per_mtok = 0.075
+output_per_mtok = 0.30
+json_schema = true
+
+[models."groq:llama-3.3-70b-versatile"]
+input_per_mtok = 0.59
+output_per_mtok = 0.79
+json_schema = false
+
+[models."groq:qwen/qwen3-32b"]
+input_per_mtok = 0.29
+output_per_mtok = 0.59
+json_schema = false
+
+[models."gemini:gemini-2.5-flash"]
+input_per_mtok = 0.30
+output_per_mtok = 2.50
+json_schema = false
+
+[roles]
+judge = "groq:openai/gpt-oss-120b"
+writer = "gemini:gemini-2.5-flash"
