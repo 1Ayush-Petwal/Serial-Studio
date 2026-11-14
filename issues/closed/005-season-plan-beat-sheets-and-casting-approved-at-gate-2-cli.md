@@ -1,7 +1,7 @@
 ---
 number: 5
 title: "Season plan, beat sheets and casting, approved at gate 2 (CLI)"
-state: open
+state: closed
 labels: [ready-for-agent]
 url: https://github.com/1Ayush-Petwal/Serial-Studio/issues/5
 created: 2026-11-07T19:45:43Z

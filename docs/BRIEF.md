@@ -294,6 +294,7 @@ serial-studio/
 | 36 | Sound: Freesound CC0 Foley with a licence manifest; one series sting with 2-3 variants picked from the tension curve; code-generated stings as backup | The sting is the show's sonic logo; repetition is the point |
 | 37 | Judge stand-in: a Groq-hosted non-Google model on day 1; Qwen3-8B on Modal from day 2; bible re-extracted on Qwen | Modal account arrives day 2; calibration must use the final judge |
 | 38 | Script approvals strictly in episode order; reading in any order is fine | "What the listener knows after ep N" must be fixed before signing off ep N+1 |
+| 39 | Modal deferred to the last build step (supersedes the day-2 timing in 37 and 30): Groq stays the judge; Kokoro runs locally on CPU until then. On the swap: re-extract bibles and re-run calibration on Qwen | Keep building without the Modal account; calibration must still end on the final judge |
 
 ---
 

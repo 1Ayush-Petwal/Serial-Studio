@@ -1,7 +1,7 @@
 ---
 number: 3
 title: "Anthology story boundaries and near-duplicate detection for all 3 demo stories"
-state: open
+state: closed
 labels: [ready-for-agent]
 url: https://github.com/1Ayush-Petwal/Serial-Studio/issues/3
 created: 2026-11-07T19:45:39Z
