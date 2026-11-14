@@ -21,12 +21,17 @@ uv run serial-studio show RUN_ID                           # review what the ope
 uv run serial-studio approve RUN_ID                        # gate 1 -> Beat Planner, pauses at gate 2
 uv run serial-studio reject RUN_ID --notes "..."           # re-runs the gate's agent with the notes
 uv run serial-studio resume RUN_ID                         # continue a crashed run from its last node
+uv run serial-studio baseline "The Speckled Band" --book 1661   # single-prompt season for the A/B test
 ```
 
 Ingest cuts the story out of the anthology by its heading, then looks for other Gutenberg copies
 (Gutendex searches on the book's and the story's title): MinHash over 5-word shingles, Jaccard >= 0.8
 means the same story. The cleanest copy (fewest markup artefacts, then lowest book id) becomes the text;
 every copy is kept as `Story.lineage`.
+
+The baseline is one writer call (same model, same script schema, no planning or validation); its
+scripts are stored with `source = 'baseline'` in the `scripts` table, a label kept out of the script a
+blind judge reads.
 
 Gates: 1 = bible and clue ledger (Story Architect), 2 = season plan and casting (Beat Planner).
 Approving gate 2 writes the voices and each clue's plant/reveal episode into a new bible version.

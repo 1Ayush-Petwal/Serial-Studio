@@ -14,7 +14,7 @@ from .test_gate_2 import answer
 
 
 def is_baseline(body: dict[str, Any]) -> bool:
-    return bool(body["messages"][0]["content"] == baseline.SYSTEM)
+    return bool(body["messages"][0]["content"].startswith(baseline.SYSTEM))
 
 
 def baseline_calls(network: FakeNetwork) -> list[dict[str, Any]]:
