@@ -363,6 +363,7 @@ class Drafted(Schema):
     revisions: int  # in the latest round (a re-validation after an approval starts a new one)
     critique: CritiqueNotes | None = None
     history: list[str] = []  # every revision of this episode and why
+    first_draft: Script | None = None  # the writer's first take, before any revision (gold set)
 
 
 class ScreenplayInput(Schema):
@@ -425,6 +426,27 @@ class SpeakerGuesses(CriticReport):
 
 class LeadReport(Schema):
     notes: list[CritiqueNote]
+
+
+ScriptSource = Literal["pipeline", "draft", "baseline", "reference"]
+# What the editor scores on each gold item; "structure" is the hook and cliffhanger.
+HUMAN_DIMENSIONS = ("tone", "character", "structure", "ear", "overall")
+
+
+class GoldItem(Schema):
+    position: int  # all the editor sees of where it came from
+    source: ScriptSource
+    episode: int
+    script: Script
+
+
+class Calibration(Schema):
+    story_id: NonEmpty
+    prompt_version: NonEmpty  # the critique prompt the critic scores came from
+    items: int
+    thresholds: dict[str, float]  # critic -> pass mark
+    spearman: dict[str, float]
+    within_one: dict[str, float]
 
 
 class LinePerformance(Schema):

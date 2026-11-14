@@ -402,9 +402,12 @@ def write_episode(
     raw = previous.raw if previous else write(gateway, run_id, first_messages(inp))
     history = list(previous.history) if previous else []
     notes = previous.critique if previous else None
+    first = previous.first_draft if previous else None
     revisions = 0
     while True:
         script, violations, fixes = draft(raw, inp)
+        if first is None and previous is None and revisions == 0:
+            first = script
         if script is None:
             if revisions == MAX_REVISIONS:
                 raise ValueError(f"episode {inp.episode}: writer returned unparseable scripts: {violations}")
@@ -427,6 +430,7 @@ def write_episode(
                     revisions=revisions,
                     critique=notes,
                     history=history,
+                    first_draft=first,
                 )
             problems = [v.message for v in violations] + [f"{m} (critic: must fix)" for m in must]
         history.append(f"revision {len(history) + 1}: " + "; ".join(problems))

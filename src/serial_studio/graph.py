@@ -20,7 +20,7 @@ from langgraph.graph import START, StateGraph
 from langgraph.types import Command, Send, interrupt
 from pydantic import BaseModel
 
-from serial_studio import baseline, beat_planner, critique, db, schemas, screenplay, story_architect
+from serial_studio import baseline, beat_planner, calibration, critique, db, schemas, screenplay, story_architect
 from serial_studio.gateway import Gateway
 from serial_studio.ingest import ingest, scenes
 from serial_studio.schemas import (
@@ -152,6 +152,7 @@ def build(conn: psycopg.Connection[Any], gateway: Gateway) -> StateGraph[RunStat
     def cast_node(s: RunState) -> dict[str, Any]:
         # The approved casting and clue episodes become a new bible version (one writer of truth).
         assert s.bible is not None and s.plan is not None
+        db.save_plan(conn, s.plan)
         return {"bible": db.save_bible(conn, story_architect.cast(s.bible, s.plan))}
 
     def screenplay_input(s: RunState, episode: int) -> ScreenplayInput:
@@ -168,15 +169,21 @@ def build(conn: psycopg.Connection[Any], gateway: Gateway) -> StateGraph[RunStat
         inp = screenplay_input(s, episode)
         sheet = inp.plan.episodes[episode - 1]
 
+        cal = calibration.latest(conn)  # None until the gold set is scored: critics then do not gate
+
         def panel(script: Script) -> CritiqueNotes:
-            return critique.critique(
+            notes = critique.critique(
                 gateway, s.run_id, critique.critique_input(script, sheet, inp.bible, inp.story.title)
             )
+            return calibration.gate(notes, cal)
 
         return screenplay.write_episode(gateway, s.run_id, inp, previous=previous, critic=panel)
 
     def write_episode_node(s: RunState) -> dict[str, Any]:
-        return {"drafts": {s.episode: write(s, s.episode)}}
+        d = write(s, s.episode)
+        if d.first_draft is not None:
+            db.save_script(conn, "draft", d.first_draft)  # first takes join the gold set
+        return {"drafts": {s.episode: d}}
 
     def gate_3_node(s: RunState) -> dict[str, Any]:
         """Every draft is readable; only the next episode in order can be approved."""
