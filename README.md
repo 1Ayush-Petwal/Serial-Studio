@@ -18,7 +18,7 @@ uv run serial-studio run "The Speckled Band" --book 1661   # ingest + Story Arch
 uv run serial-studio run "The Red-Headed League" --book 1661   # other demo stories
 uv run serial-studio run "Silver Blaze" --book 834
 uv run serial-studio show RUN_ID                           # review what the open gate is waiting on
-uv run serial-studio approve RUN_ID                        # gate 1 -> Beat Planner, pauses at gate 2
+uv run serial-studio approve RUN_ID                        # gate 1 -> Beat Planner -> gate 2 -> episode 1 script -> gate 3
 uv run serial-studio reject RUN_ID --notes "..."           # re-runs the gate's agent with the notes
 uv run serial-studio resume RUN_ID                         # continue a crashed run from its last node
 uv run serial-studio baseline "The Speckled Band" --book 1661   # single-prompt season for the A/B test
@@ -33,8 +33,16 @@ The baseline is one writer call (same model, same script schema, no planning or 
 scripts are stored with `source = 'baseline'` in the `scripts` table, a label kept out of the script a
 blind judge reads.
 
-Gates: 1 = bible and clue ledger (Story Architect), 2 = season plan and casting (Beat Planner).
-Approving gate 2 writes the voices and each clue's plant/reveal episode into a new bible version.
+Gates: 1 = bible and clue ledger (Story Architect), 2 = season plan and casting (Beat Planner),
+3 = episode script (Screenplay agent). Approving gate 2 writes the voices and each clue's plant/reveal
+episode into a new bible version.
+
+The Screenplay agent marks clues `[clue:id] ... [/clue]` and cues `[sting]`, `[sfx:id]`, `[bed:id]`
+inline; code strips them into word indices. Validators: <= 300 words, predicted runtime <= 110 s
+(150 wpm, 0.3 s per line break, 3 s sting tail - placeholders until voices are measured), every planned
+clue marked once with all its keywords inside the span, no clue before its planned episode, speakers
+in the bible and cast, well-formed markers (1 sting, <= 3 Foley). Misspelled names are fixed in code;
+anything else goes back as a note, at most 2 revisions, then gate 3 shows what is still broken.
 
 Models come from `src/serial_studio/models.toml` (`[roles]`), overridable with
 `JUDGE_MODEL=provider:model` / `WRITER_MODEL=provider:model`. The writer (Gemini) needs a key from

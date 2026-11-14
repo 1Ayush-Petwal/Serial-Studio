@@ -330,6 +330,22 @@ class Script(Schema):
     cues: list[CueMarker]
 
 
+class ScriptDraft(Schema):
+    """A writer's episode: line text may carry [clue:id]...[/clue], [sting], [sfx:id] and [bed:id] markers."""
+
+    title: NonEmpty
+    blurb: NonEmpty
+    lines: list[ScriptLine] = Field(min_length=1)
+
+
+class ScreenplayInput(Schema):
+    story: Story
+    bible: Bible  # the cast version written at gate 2
+    plan: SeasonPlan
+    episode: int
+    notes: str | None = None  # gate-3 editor notes
+
+
 class BaselineEpisode(Schema):
     title: NonEmpty
     blurb: NonEmpty

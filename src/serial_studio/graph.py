@@ -16,11 +16,11 @@ from langchain_core.runnables import RunnableConfig
 from langfuse import Langfuse
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
-from langgraph.graph import END, START, StateGraph
+from langgraph.graph import START, StateGraph
 from langgraph.types import Command, interrupt
 from pydantic import BaseModel
 
-from serial_studio import baseline, beat_planner, db, schemas, story_architect
+from serial_studio import baseline, beat_planner, db, schemas, screenplay, story_architect
 from serial_studio.gateway import Gateway
 from serial_studio.ingest import ingest, scenes
 from serial_studio.schemas import (
@@ -31,10 +31,15 @@ from serial_studio.schemas import (
     PlannerInput,
     RunStatus,
     Scene,
+    ScreenplayInput,
+    Script,
     SeasonPlan,
     StartRun,
     Story,
+    Violation,
 )
+
+MAX_REVISIONS = 2
 
 
 class RunState(BaseModel):
@@ -49,6 +54,15 @@ class RunState(BaseModel):
     plan: SeasonPlan | None = None
     plan_notes: str | None = None  # gate-2 notes for the Beat Planner
     plan_approved: bool = False
+    episode: int = 1
+    draft: str | None = None  # the writer's last raw answer, the base for a revision
+    script: Script | None = None
+    violations: list[Violation] = []
+    fixes: list[str] = []
+    revisions: int = 0
+    script_version: int = 0
+    script_notes: str | None = None  # gate-3 notes for the Screenplay agent
+    script_approved: bool = False
 
 
 def gate(conn: psycopg.Connection[Any], payload: GatePayload) -> Decision:
@@ -118,6 +132,58 @@ def build(conn: psycopg.Connection[Any], gateway: Gateway) -> StateGraph[RunStat
         assert s.bible is not None and s.plan is not None
         return {"bible": db.save_bible(conn, story_architect.cast(s.bible, s.plan))}
 
+    def screenplay_input(s: RunState) -> ScreenplayInput:
+        assert s.story is not None and s.bible is not None and s.plan is not None
+        return ScreenplayInput(story=s.story, bible=s.bible, plan=s.plan, episode=s.episode, notes=s.script_notes)
+
+    def screenplay_node(s: RunState) -> dict[str, Any]:
+        inp = screenplay_input(s)
+        if s.draft is not None and s.violations:
+            messages = screenplay.revision_messages(inp, s.draft, s.violations)
+            revisions = s.revisions + 1
+        else:
+            messages, revisions = screenplay.first_messages(inp), 0
+        return {"draft": screenplay.write(gateway, s.run_id, messages), "revisions": revisions}
+
+    def validate_node(s: RunState) -> dict[str, Any]:
+        assert s.draft is not None
+        script, violations, fixes = screenplay.draft(s.draft, screenplay_input(s))
+        if script is None and s.revisions == MAX_REVISIONS:
+            raise ValueError(f"episode {s.episode}: writer returned unparseable scripts: {violations}")
+        return {"script": script, "violations": violations, "fixes": fixes}
+
+    def gate_3_node(s: RunState) -> dict[str, Any]:
+        assert s.script is not None and s.bible is not None
+        version = s.script_version + 1
+        payload = GatePayload(
+            gate=3,
+            run_id=s.run_id,
+            target=f"script:{s.bible.story_id}:ep{s.episode}:v{version}",
+            payload={
+                "script": s.script.model_dump(),
+                "markup": screenplay.markup(s.script),
+                "predicted_seconds": screenplay.predicted_seconds(s.script),
+                "violations": [v.model_dump() for v in s.violations],
+                "fixes": s.fixes,
+                "revisions": s.revisions,
+            },
+        )
+        decision = gate(conn, payload)
+        if decision.verdict == "approve":
+            db.save_season(conn, "pipeline", [s.script])  # ponytail: one episode until #8 writes the season
+            return {"script_approved": True, "script_version": version}
+        notes = "\n".join(n for n in (s.script_notes, decision.notes) if n)
+        return {"script_notes": notes, "script_version": version, "draft": None, "violations": [], "revisions": 0}
+
+    def after_validate(s: RunState) -> Literal["screenplay", "gate_3"]:
+        # A script that cannot be parsed has nothing to show the editor, so it goes back until validate fails loudly.
+        if s.violations and (s.script is None or s.revisions < MAX_REVISIONS):
+            return "screenplay"
+        return "gate_3"
+
+    def after_gate_3(s: RunState) -> Literal["screenplay", "__end__"]:
+        return "__end__" if s.script_approved else "screenplay"
+
     def after_architect(s: RunState) -> Literal["story_architect", "save_bible"]:
         return "story_architect" if s.scene_index < len(s.scenes) else "save_bible"
 
@@ -135,6 +201,9 @@ def build(conn: psycopg.Connection[Any], gateway: Gateway) -> StateGraph[RunStat
     g.add_node("beat_planner", beat_planner_node)
     g.add_node("gate_2", gate_2_node)
     g.add_node("cast", cast_node)
+    g.add_node("screenplay", screenplay_node)
+    g.add_node("validate", validate_node)
+    g.add_node("gate_3", gate_3_node)
     g.add_edge(START, "ingest")
     g.add_edge("ingest", "story_architect")
     g.add_conditional_edges("story_architect", after_architect)
@@ -142,7 +211,10 @@ def build(conn: psycopg.Connection[Any], gateway: Gateway) -> StateGraph[RunStat
     g.add_conditional_edges("gate_1", after_gate_1)
     g.add_edge("beat_planner", "gate_2")
     g.add_conditional_edges("gate_2", after_gate_2)
-    g.add_edge("cast", END)
+    g.add_edge("cast", "screenplay")
+    g.add_edge("screenplay", "validate")
+    g.add_conditional_edges("validate", after_validate)
+    g.add_conditional_edges("gate_3", after_gate_3)
     return g
 
 
