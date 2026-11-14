@@ -94,6 +94,14 @@ def show(status: RunStatus, episode: int | None = None) -> None:
             print(f"  auto-fixed: {f}")
         for v in g3["violations"]:
             print(f"  VIOLATION {v['rule']}: {v['message']}")
+        card = g3["report_card"]
+        print("REPORT CARD  (critic scores do not gate until calibrated)")
+        for name, score in card["scores"].items():
+            print(f"  {name}: {score}")
+        for r in card["revisions"]:
+            print(f"  {r}")
+        for n in (g3["critique"] or {}).get("notes", []):
+            print(f"  {'MUST FIX ' if n['must_fix'] else ''}#{n['rank']} {n['critic']}: {n['note']}")
 
 
 def main(argv: list[str] | None = None) -> None:

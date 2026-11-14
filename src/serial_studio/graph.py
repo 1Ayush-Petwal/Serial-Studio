@@ -20,19 +20,22 @@ from langgraph.graph import START, StateGraph
 from langgraph.types import Command, Send, interrupt
 from pydantic import BaseModel
 
-from serial_studio import baseline, beat_planner, db, schemas, screenplay, story_architect
+from serial_studio import baseline, beat_planner, critique, db, schemas, screenplay, story_architect
 from serial_studio.gateway import Gateway
 from serial_studio.ingest import ingest, scenes
 from serial_studio.schemas import (
     ArchitectInput,
     Bible,
+    CritiqueNotes,
     Decision,
     Drafted,
     GatePayload,
     PlannerInput,
+    ReportCard,
     RunStatus,
     Scene,
     ScreenplayInput,
+    Script,
     SeasonPlan,
     StartRun,
     Story,
@@ -76,6 +79,11 @@ def review(d: Drafted) -> dict[str, Any]:
         "violations": [v.model_dump() for v in d.violations],
         "fixes": d.fixes,
         "revisions": d.revisions,
+        "critique": d.critique.model_dump() if d.critique else None,
+        # ponytail: per-episode cost lines arrive with the cost report (#16)
+        "report_card": ReportCard(
+            episode=d.episode, scores=d.critique.scores if d.critique else {}, revisions=d.history, cost_lines=[]
+        ).model_dump(),
     }
 
 
@@ -156,8 +164,19 @@ def build(conn: psycopg.Connection[Any], gateway: Gateway) -> StateGraph[RunStat
         assert s.plan is not None
         return [Send("write_episode", s.model_copy(update={"episode": e.episode})) for e in s.plan.episodes]
 
+    def write(s: RunState, episode: int, previous: Drafted | None = None) -> Drafted:
+        inp = screenplay_input(s, episode)
+        sheet = inp.plan.episodes[episode - 1]
+
+        def panel(script: Script) -> CritiqueNotes:
+            return critique.critique(
+                gateway, s.run_id, critique.critique_input(script, sheet, inp.bible, inp.story.title)
+            )
+
+        return screenplay.write_episode(gateway, s.run_id, inp, previous=previous, critic=panel)
+
     def write_episode_node(s: RunState) -> dict[str, Any]:
-        return {"drafts": {s.episode: screenplay.write_episode(gateway, s.run_id, screenplay_input(s, s.episode))}}
+        return {"drafts": {s.episode: write(s, s.episode)}}
 
     def gate_3_node(s: RunState) -> dict[str, Any]:
         """Every draft is readable; only the next episode in order can be approved."""
@@ -180,7 +199,7 @@ def build(conn: psycopg.Connection[Any], gateway: Gateway) -> StateGraph[RunStat
 
     def rewrite_node(s: RunState) -> dict[str, Any]:
         n = s.approved + 1
-        return {"drafts": {n: screenplay.write_episode(gateway, s.run_id, screenplay_input(s, n))}}
+        return {"drafts": {n: write(s, n)}}
 
     def reconcile_node(s: RunState) -> dict[str, Any]:
         """Record what the approved episode established, then hold every later draft to it."""
@@ -192,11 +211,7 @@ def build(conn: psycopg.Connection[Any], gateway: Gateway) -> StateGraph[RunStat
         bible = db.save_bible(conn, s.bible.model_copy(update={"episodes": [*s.bible.episodes, record]}))
         db.save_script(conn, "pipeline", script)
         later = s.model_copy(update={"bible": bible})
-        drafts = {
-            d.episode: screenplay.write_episode(gateway, s.run_id, screenplay_input(later, d.episode), previous=d)
-            for d in s.season()
-            if d.episode > n
-        }
+        drafts = {d.episode: write(later, d.episode, previous=d) for d in s.season() if d.episode > n}
         return {"bible": bible, "drafts": drafts}
 
     def after_gate_3(s: RunState) -> Literal["reconcile", "rewrite"]:

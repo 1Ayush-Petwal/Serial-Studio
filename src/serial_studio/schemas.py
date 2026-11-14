@@ -360,7 +360,9 @@ class Drafted(Schema):
     script: Script
     violations: list[Violation]
     fixes: list[str]
-    revisions: int
+    revisions: int  # in the latest round (a re-validation after an approval starts a new one)
+    critique: CritiqueNotes | None = None
+    history: list[str] = []  # every revision of this episode and why
 
 
 class ScreenplayInput(Schema):
@@ -395,7 +397,33 @@ class CritiqueNote(Schema):
 
 
 class CritiqueNotes(Schema):
-    scores: dict[str, float]  # critic -> 1-5
+    scores: dict[str, float]  # critic -> 1-5, plus speaker_accuracy 0-1
+    notes: list[CritiqueNote]  # ranked by the lead critic
+
+
+class CritiqueInput(Schema):
+    episode: int
+    title: NonEmpty  # the story's
+    script: Script
+    beats: list[Beat]
+    cast: list[str]
+
+
+class CriticReport(Schema):
+    score: Annotated[int, Field(ge=1, le=5)]
+    notes: list[NonEmpty]
+
+
+class SpeakerGuess(Schema):
+    line: int
+    speaker: str
+
+
+class SpeakerGuesses(CriticReport):
+    guesses: list[SpeakerGuess]
+
+
+class LeadReport(Schema):
     notes: list[CritiqueNote]
 
 

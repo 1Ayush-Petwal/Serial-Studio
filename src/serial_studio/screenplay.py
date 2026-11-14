@@ -10,6 +10,7 @@ from __future__ import annotations
 import difflib
 import json
 import re
+from collections.abc import Callable
 
 from pydantic import ValidationError
 
@@ -19,6 +20,7 @@ from serial_studio.schemas import (
     BeatSheet,
     Cliffhanger,
     ClueSpan,
+    CritiqueNotes,
     CueMarker,
     Drafted,
     Message,
@@ -139,8 +141,8 @@ def first_messages(inp: ScreenplayInput) -> list[Message]:
     return [Message(role="system", content=SYSTEM), Message(role="user", content=user_prompt(inp))]
 
 
-def revision_messages(inp: ScreenplayInput, previous: str, violations: list[Violation]) -> list[Message]:
-    notes = "\n- ".join(v.message for v in violations)
+def revision_messages(inp: ScreenplayInput, previous: str, problems: list[str]) -> list[Message]:
+    notes = "\n- ".join(problems)
     return [
         *first_messages(inp),
         Message(role="assistant", content=previous),
@@ -382,19 +384,53 @@ def draft(raw: str, inp: ScreenplayInput) -> tuple[Script | None, list[Violation
     return script, malformed + validate(script, inp), fixes
 
 
-def write_episode(gateway: Gateway, run_id: str, inp: ScreenplayInput, previous: Drafted | None = None) -> Drafted:
-    """Draft an episode (or re-check `previous` against the current bible), revising up to MAX_REVISIONS times."""
+Critic = Callable[[Script], CritiqueNotes]
+
+
+def write_episode(
+    gateway: Gateway,
+    run_id: str,
+    inp: ScreenplayInput,
+    previous: Drafted | None = None,
+    critic: Critic | None = None,
+) -> Drafted:
+    """Draft an episode (or re-check `previous` against the current bible), revising up to MAX_REVISIONS times.
+
+    Validator violations and the critics' must-fix notes share the revision budget. Critics read only a
+    script that is about to reach the editor; their scores never send it back while uncalibrated.
+    """
     raw = previous.raw if previous else write(gateway, run_id, first_messages(inp))
+    history = list(previous.history) if previous else []
+    notes = previous.critique if previous else None
     revisions = 0
     while True:
         script, violations, fixes = draft(raw, inp)
-        if script is not None and (not violations or revisions == MAX_REVISIONS):
-            return Drafted(
-                episode=inp.episode, raw=raw, script=script, violations=violations, fixes=fixes, revisions=revisions
-            )
-        if revisions == MAX_REVISIONS:
-            raise ValueError(f"episode {inp.episode}: writer returned unparseable scripts: {violations}")
-        raw = write(gateway, run_id, revision_messages(inp, raw, violations))
+        if script is None:
+            if revisions == MAX_REVISIONS:
+                raise ValueError(f"episode {inp.episode}: writer returned unparseable scripts: {violations}")
+            problems = [v.message for v in violations]
+        elif previous is not None and revisions == 0 and not violations:
+            # Still passes against the new bible: keep the draft the critics already read.
+            return previous.model_copy(update={"script": script, "fixes": fixes})
+        else:
+            must: list[str] = []
+            if critic is not None and (not violations or revisions == MAX_REVISIONS):
+                notes = critic(script)
+                must = [n.note for n in notes.notes if n.must_fix]
+            if revisions == MAX_REVISIONS or not (violations or must):
+                return Drafted(
+                    episode=inp.episode,
+                    raw=raw,
+                    script=script,
+                    violations=violations,
+                    fixes=fixes,
+                    revisions=revisions,
+                    critique=notes,
+                    history=history,
+                )
+            problems = [v.message for v in violations] + [f"{m} (critic: must fix)" for m in must]
+        history.append(f"revision {len(history) + 1}: " + "; ".join(problems))
+        raw = write(gateway, run_id, revision_messages(inp, raw, problems))
         revisions += 1
 
 

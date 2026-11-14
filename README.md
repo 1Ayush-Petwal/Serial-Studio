@@ -51,6 +51,12 @@ Story Architect record what the episode established - the ending it actually rea
 from the plan - as a new bible version; later drafts are re-validated against it, and any that now
 break (say, a seam after a changed ending) go back to the Screenplay agent before the editor sees them.
 
+Critique panel (CrewAI crew, judge model through the gateway): tone, character (guesses each speaker
+from lines with names stripped -> `speaker_accuracy`), structure and ear critics, and a lead critic who
+ranks the notes and marks must-fix ones. Until calibration (#10) scores never gate: only must-fix notes
+send a script back, sharing the 2-revision budget with the validators. Gate 3 shows the report card:
+scores per critic and every revision with its reason. CrewAI telemetry and trace upload are off.
+
 Models come from `src/serial_studio/models.toml` (`[roles]`), overridable with
 `JUDGE_MODEL=provider:model` / `WRITER_MODEL=provider:model`. The writer (Gemini) needs a key from
 an AI Studio project without prepaid billing, or calls fail with 402.
