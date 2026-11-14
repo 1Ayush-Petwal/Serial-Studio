@@ -2,7 +2,7 @@
 
 serial-studio run "The Speckled Band" --book 1661
 serial-studio show RUN_ID
-serial-studio approve RUN_ID
+serial-studio approve RUN_ID           # gates 1-3
 serial-studio reject RUN_ID --notes "..."
 serial-studio resume RUN_ID            # continue a crashed run
 serial-studio baseline "The Speckled Band" --book 1661   # single-prompt season for the A/B test
@@ -24,7 +24,7 @@ from langfuse import Langfuse
 from serial_studio import db
 from serial_studio.graph import Runner
 from serial_studio.ingest import slug
-from serial_studio.schemas import Bible, Decision, RunStatus, SeasonPlan, StartRun
+from serial_studio.schemas import Bible, Decision, RunStatus, Script, SeasonPlan, StartRun
 
 
 def show(status: RunStatus) -> None:
@@ -76,6 +76,18 @@ def show(status: RunStatus) -> None:
         print("CASTING")
         for name, voice in plan.casting.items():
             print(f"  {name}: {voice}")
+    elif status.gate.gate == 3:
+        g3 = status.gate.payload
+        script = Script.model_validate(g3["script"])
+        words = sum(len(line.text.split()) for line in script.lines)
+        print(f"EPISODE {script.episode}: {script.title}  (bible v{script.bible_version})\n  {script.blurb}")
+        print(f"  {words} words, predicted {g3['predicted_seconds']} s, {g3['revisions']} revision(s)\n")
+        for line in g3["markup"]:
+            print(f"  {line}")
+        for f in g3["fixes"]:
+            print(f"  auto-fixed: {f}")
+        for v in g3["violations"]:
+            print(f"  VIOLATION {v['rule']}: {v['message']}")
 
 
 def main(argv: list[str] | None = None) -> None:

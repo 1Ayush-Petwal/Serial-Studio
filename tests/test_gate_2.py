@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from serial_studio import db
+from serial_studio import db, screenplay
 from serial_studio.schemas import Decision, SeasonPlan
 
 from .conftest import App, FakeNetwork
@@ -17,6 +17,12 @@ from .test_gate_1 import SPECKLED_BAND, TARGET_V1, approve
 TARGET_PLAN_V1 = "season-plan:the-speckled-band:v1"
 PLAN_NOTES = "Use a female narrator voice."
 SPEAKERS = {"Sherlock Holmes", "Dr. John H. Watson", "Helen Stoner", "Dr. Roylott"}
+# Gate 3's tests cover scripts; here any answer will do to show the run moves on.
+TINY_SCRIPT = {"title": "t", "blurb": "b", "lines": [{"speaker": "narrator", "text": "Fog."}]}
+
+
+def is_screenplay(body: dict[str, Any]) -> bool:
+    return bool(body["messages"][0]["content"].startswith(screenplay.SYSTEM))
 
 
 def at_gate_2(app: App) -> Any:
@@ -31,7 +37,7 @@ def plan_of(status: Any) -> SeasonPlan:
 def decide(app: App, status: Any, verdict: str, notes: str = "") -> Any:
     gate = status.gate
     return app.runner.decide(
-        Decision(run_id=status.run_id, gate=2, target=gate.target, verdict=verdict, notes=notes)  # type: ignore[arg-type]
+        Decision(run_id=status.run_id, gate=gate.gate, target=gate.target, verdict=verdict, notes=notes)  # type: ignore[arg-type]
     )
 
 
@@ -89,15 +95,16 @@ def test_approved_bible_leads_to_a_fair_play_season_plan_at_gate_2(make_app: Cal
 
 
 def test_gate_2_approve_writes_casting_and_clue_episodes_into_a_new_bible_version(
-    make_app: Callable[..., App],
+    make_app: Callable[..., App], network: FakeNetwork
 ) -> None:
     app = make_app()
     status = at_gate_2(app)
     plan = plan_of(status)
 
+    network.override = lambda body: answer(TINY_SCRIPT) if is_screenplay(body) else None
     done = decide(app, status, "approve")
 
-    assert done.state == "done"
+    assert done.gate.gate == 3, "an approved plan goes on to the Screenplay agent"
     v1, v2 = db.bible_versions(app.conn, "the-speckled-band")
     assert v2.version == 2
     assert v2.narrator_voice_id == plan.casting["narrator"]
@@ -117,14 +124,20 @@ def test_gate_2_reject_reruns_the_beat_planner_with_the_notes(
     sent = len(planner_calls(network))
     # One free-tier Gemini plan takes hours to come back, so the re-run replays the recorded plan.
     recorded = recorded_plan(network)
-    network.override = lambda body: answer(recorded) if PLAN_NOTES in json.dumps(body) else None
+
+    def respond(body: dict[str, Any]) -> dict[str, Any] | None:
+        if is_screenplay(body):
+            return answer(TINY_SCRIPT)
+        return answer(recorded) if PLAN_NOTES in json.dumps(body) else None
+
+    network.override = respond
 
     second = decide(app, first, "reject", PLAN_NOTES)
 
     assert second.gate is not None and second.gate.target == "season-plan:the-speckled-band:v2"
     [rerun] = planner_calls(network)[sent:]
     assert PLAN_NOTES in rerun["messages"][1]["content"]
-    assert decide(app, second, "approve").state == "done"
+    assert decide(app, second, "approve").gate.gate == 3
 
 
 def test_a_plan_breaking_the_rules_goes_back_to_the_planner_with_the_problems(
