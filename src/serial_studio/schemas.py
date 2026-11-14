@@ -136,6 +136,19 @@ class BibleDelta(Schema):
     closed_threads: list[NonEmpty]  # ids of threads this scene resolves
 
 
+class EpisodeRecordDraft(Schema):
+    """What the Story Architect reads off an approved script."""
+
+    ending: Cliffhanger | None  # the event the episode actually ends on; None for the last episode
+    established: list[NonEmpty]  # what the listener now knows
+    differs_from_plan: list[str]  # e.g. a clue moved, a secret told early, a different ending
+
+
+class EpisodeRecord(EpisodeRecordDraft):
+    episode: int
+    planted: list[str]  # clue ids marked in the approved script (code)
+
+
 class Bible(Schema):
     story_id: NonEmpty
     version: int = 0  # assigned when persisted; 0 = not yet saved
@@ -146,6 +159,7 @@ class Bible(Schema):
     clues: list[Clue] = []
     open_threads: list[OpenThread] = []
     narrator_voice_id: VoiceId | None = None  # chosen at gate 2
+    episodes: list[EpisodeRecord] = []  # one per approved script, in order (gate 3)
 
 
 class ArchitectInput(Schema):
@@ -336,6 +350,17 @@ class ScriptDraft(Schema):
     title: NonEmpty
     blurb: NonEmpty
     lines: list[ScriptLine] = Field(min_length=1)
+
+
+class Drafted(Schema):
+    """One episode's latest draft and where it stands against the validators."""
+
+    episode: int
+    raw: str  # the writer's answer, the base for a revision
+    script: Script
+    violations: list[Violation]
+    fixes: list[str]
+    revisions: int
 
 
 class ScreenplayInput(Schema):

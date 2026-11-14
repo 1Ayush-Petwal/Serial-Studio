@@ -17,8 +17,10 @@ from serial_studio.beat_planner import _names
 from serial_studio.gateway import Gateway, role_model, strict_schema
 from serial_studio.schemas import (
     BeatSheet,
+    Cliffhanger,
     ClueSpan,
     CueMarker,
+    Drafted,
     Message,
     ModelRequest,
     ScreenplayInput,
@@ -34,6 +36,8 @@ TARGET_WORDS = 260
 MAX_WORDS = 300
 MAX_SECONDS = 110.0
 MAX_FOLEY = 3
+MAX_REVISIONS = 2
+OPENING_WORDS = 60  # episode 2 on: the previous ending's keywords must land this early
 # ponytail: one rate for every voice until per-voice wpm is measured on Kokoro/Chatterbox renders.
 WPM = 150.0
 # Seconds; before the Performance Director labels pauses, every line break is a "short" pause.
@@ -75,8 +79,15 @@ def source_text(inp: ScreenplayInput) -> str:
     return inp.story.text[_sheet(inp).start : end]
 
 
+def seam(inp: ScreenplayInput) -> Cliffhanger | None:
+    """The ending this episode must pick up: what the approved previous episode ended on, else the plan's."""
+    record = next((r for r in inp.bible.episodes if r.episode == inp.episode - 1), None)
+    return record.ending if record else _sheet(inp).previous_cliffhanger
+
+
 def user_prompt(inp: ScreenplayInput) -> str:
     sheet = _sheet(inp)
+    previous = seam(inp)
     planned = {cid for b in sheet.beats for cid in b.clue_ids}
     brief = {
         "episode": sheet.episode,
@@ -84,7 +95,7 @@ def user_prompt(inp: ScreenplayInput) -> str:
         "title": sheet.title,
         "listener_knows": sheet.listener_knows,
         "recap": sheet.recap,
-        "previous_cliffhanger": sheet.previous_cliffhanger.model_dump() if sheet.previous_cliffhanger else None,
+        "previous_cliffhanger": previous.model_dump() if previous else None,
         "beats": [b.model_dump() for b in sheet.beats],
         "cliffhanger": sheet.cliffhanger.model_dump() if sheet.cliffhanger else None,
         "clues_to_plant": [
@@ -96,9 +107,15 @@ def user_prompt(inp: ScreenplayInput) -> str:
         "characters": [{"name": c.name, "description": c.description} for c in inp.bible.characters],
     }
     notes = f"\nEditor notes from the last review; apply them:\n{inp.notes}\n" if inp.notes else ""
+    opening = (
+        f"\nOpen with the recap as one narrator line, then pick up the previous episode's ending, saying "
+        f"{', '.join(map(repr, previous.keywords))} within the first {OPENING_WORDS} words.\n"
+        if previous
+        else ""
+    )
     return (
         f"Story: {inp.story.title} by {inp.story.author}\n"
-        f"Episode brief:\n{json.dumps(brief, ensure_ascii=False)}\n{notes}\n"
+        f"Episode brief:\n{json.dumps(brief, ensure_ascii=False)}\n{opening}{notes}\n"
         f"Source passage:\n<<<\n{source_text(inp)}\n>>>"
     )
 
@@ -257,6 +274,20 @@ def predicted_seconds(script: Script) -> float:
 def validate(script: Script, inp: ScreenplayInput) -> list[Violation]:
     out: list[Violation] = []
     ws = words(script)
+    previous = seam(inp)
+    if previous:
+        if _norm(script.lines[0].speaker) != NARRATOR:
+            out.append(Violation(rule="recap", message="open with the recap as one narrator line", line=1))
+        opening = " ".join(ws[:OPENING_WORDS]).lower()
+        missing = [k for k in previous.keywords if not re.search(r"\b" + re.escape(k), opening)]
+        if missing:
+            out.append(
+                Violation(
+                    rule="seam",
+                    message=f"the opening must pick up the last episode's ending ({previous.event}): say "
+                    f"{', '.join(map(repr, missing))} within the first {OPENING_WORDS} words",
+                )
+            )
     if len(ws) > MAX_WORDS:
         out.append(
             Violation(
@@ -349,6 +380,22 @@ def draft(raw: str, inp: ScreenplayInput) -> tuple[Script | None, list[Violation
     script, malformed = parse(d, inp)
     script, fixes = autofix(script, inp)
     return script, malformed + validate(script, inp), fixes
+
+
+def write_episode(gateway: Gateway, run_id: str, inp: ScreenplayInput, previous: Drafted | None = None) -> Drafted:
+    """Draft an episode (or re-check `previous` against the current bible), revising up to MAX_REVISIONS times."""
+    raw = previous.raw if previous else write(gateway, run_id, first_messages(inp))
+    revisions = 0
+    while True:
+        script, violations, fixes = draft(raw, inp)
+        if script is not None and (not violations or revisions == MAX_REVISIONS):
+            return Drafted(
+                episode=inp.episode, raw=raw, script=script, violations=violations, fixes=fixes, revisions=revisions
+            )
+        if revisions == MAX_REVISIONS:
+            raise ValueError(f"episode {inp.episode}: writer returned unparseable scripts: {violations}")
+        raw = write(gateway, run_id, revision_messages(inp, raw, violations))
+        revisions += 1
 
 
 def markup(script: Script) -> list[str]:

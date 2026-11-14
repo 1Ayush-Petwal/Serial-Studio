@@ -8,7 +8,7 @@ row back into the paused node.
 from __future__ import annotations
 
 import uuid
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import httpx
 import psycopg
@@ -17,7 +17,7 @@ from langfuse import Langfuse
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.graph import START, StateGraph
-from langgraph.types import Command, interrupt
+from langgraph.types import Command, Send, interrupt
 from pydantic import BaseModel
 
 from serial_studio import baseline, beat_planner, db, schemas, screenplay, story_architect
@@ -27,19 +27,20 @@ from serial_studio.schemas import (
     ArchitectInput,
     Bible,
     Decision,
+    Drafted,
     GatePayload,
     PlannerInput,
     RunStatus,
     Scene,
     ScreenplayInput,
-    Script,
     SeasonPlan,
     StartRun,
     Story,
-    Violation,
 )
 
-MAX_REVISIONS = 2
+
+def _merge(old: dict[int, Drafted], new: dict[int, Drafted]) -> dict[int, Drafted]:
+    return {**old, **new}
 
 
 class RunState(BaseModel):
@@ -54,15 +55,28 @@ class RunState(BaseModel):
     plan: SeasonPlan | None = None
     plan_notes: str | None = None  # gate-2 notes for the Beat Planner
     plan_approved: bool = False
-    episode: int = 1
-    draft: str | None = None  # the writer's last raw answer, the base for a revision
-    script: Script | None = None
-    violations: list[Violation] = []
-    fixes: list[str] = []
-    revisions: int = 0
-    script_version: int = 0
-    script_notes: str | None = None  # gate-3 notes for the Screenplay agent
-    script_approved: bool = False
+    episode: int = 0  # the episode a write_episode branch drafts
+    drafts: Annotated[dict[int, Drafted], _merge] = {}
+    approved: int = 0  # episodes approved so far; approval is strictly in order
+    script_versions: dict[int, int] = {}  # times each episode has been shown at gate 3
+    script_notes: dict[int, str] = {}  # gate-3 notes per episode for the Screenplay agent
+    rejected: bool = False  # the last gate-3 decision sent the episode back
+
+    def season(self) -> list[Drafted]:
+        return [self.drafts[n] for n in sorted(self.drafts)]
+
+
+def review(d: Drafted) -> dict[str, Any]:
+    """What gate 3 shows for one draft."""
+    return {
+        "episode": d.episode,
+        "script": d.script.model_dump(),
+        "markup": screenplay.markup(d.script),
+        "predicted_seconds": screenplay.predicted_seconds(d.script),
+        "violations": [v.model_dump() for v in d.violations],
+        "fixes": d.fixes,
+        "revisions": d.revisions,
+    }
 
 
 def gate(conn: psycopg.Connection[Any], payload: GatePayload) -> Decision:
@@ -132,57 +146,65 @@ def build(conn: psycopg.Connection[Any], gateway: Gateway) -> StateGraph[RunStat
         assert s.bible is not None and s.plan is not None
         return {"bible": db.save_bible(conn, story_architect.cast(s.bible, s.plan))}
 
-    def screenplay_input(s: RunState) -> ScreenplayInput:
+    def screenplay_input(s: RunState, episode: int) -> ScreenplayInput:
         assert s.story is not None and s.bible is not None and s.plan is not None
-        return ScreenplayInput(story=s.story, bible=s.bible, plan=s.plan, episode=s.episode, notes=s.script_notes)
+        notes = s.script_notes.get(episode)
+        return ScreenplayInput(story=s.story, bible=s.bible, plan=s.plan, episode=episode, notes=notes)
 
-    def screenplay_node(s: RunState) -> dict[str, Any]:
-        inp = screenplay_input(s)
-        if s.draft is not None and s.violations:
-            messages = screenplay.revision_messages(inp, s.draft, s.violations)
-            revisions = s.revisions + 1
-        else:
-            messages, revisions = screenplay.first_messages(inp), 0
-        return {"draft": screenplay.write(gateway, s.run_id, messages), "revisions": revisions}
+    def fan_out(s: RunState) -> list[Send]:
+        # One branch per episode; the season drafts in parallel against the same bible and plan.
+        assert s.plan is not None
+        return [Send("write_episode", s.model_copy(update={"episode": e.episode})) for e in s.plan.episodes]
 
-    def validate_node(s: RunState) -> dict[str, Any]:
-        assert s.draft is not None
-        script, violations, fixes = screenplay.draft(s.draft, screenplay_input(s))
-        if script is None and s.revisions == MAX_REVISIONS:
-            raise ValueError(f"episode {s.episode}: writer returned unparseable scripts: {violations}")
-        return {"script": script, "violations": violations, "fixes": fixes}
+    def write_episode_node(s: RunState) -> dict[str, Any]:
+        return {"drafts": {s.episode: screenplay.write_episode(gateway, s.run_id, screenplay_input(s, s.episode))}}
 
     def gate_3_node(s: RunState) -> dict[str, Any]:
-        assert s.script is not None and s.bible is not None
-        version = s.script_version + 1
+        """Every draft is readable; only the next episode in order can be approved."""
+        assert s.bible is not None
+        n = s.approved + 1
+        d = s.drafts[n]
+        version = s.script_versions.get(n, 0) + 1
         payload = GatePayload(
             gate=3,
             run_id=s.run_id,
-            target=f"script:{s.bible.story_id}:ep{s.episode}:v{version}",
-            payload={
-                "script": s.script.model_dump(),
-                "markup": screenplay.markup(s.script),
-                "predicted_seconds": screenplay.predicted_seconds(s.script),
-                "violations": [v.model_dump() for v in s.violations],
-                "fixes": s.fixes,
-                "revisions": s.revisions,
-            },
+            target=f"script:{s.bible.story_id}:ep{n}:v{version}",
+            payload={**review(d), "season": [review(x) | {"approved": x.episode <= s.approved} for x in s.season()]},
         )
         decision = gate(conn, payload)
+        versions = s.script_versions | {n: version}
         if decision.verdict == "approve":
-            db.save_season(conn, "pipeline", [s.script])  # ponytail: one episode until #8 writes the season
-            return {"script_approved": True, "script_version": version}
-        notes = "\n".join(n for n in (s.script_notes, decision.notes) if n)
-        return {"script_notes": notes, "script_version": version, "draft": None, "violations": [], "revisions": 0}
+            return {"approved": n, "script_versions": versions, "rejected": False}
+        notes = "\n".join(x for x in (s.script_notes.get(n), decision.notes) if x)
+        return {"script_notes": s.script_notes | {n: notes}, "script_versions": versions, "rejected": True}
 
-    def after_validate(s: RunState) -> Literal["screenplay", "gate_3"]:
-        # A script that cannot be parsed has nothing to show the editor, so it goes back until validate fails loudly.
-        if s.violations and (s.script is None or s.revisions < MAX_REVISIONS):
-            return "screenplay"
-        return "gate_3"
+    def rewrite_node(s: RunState) -> dict[str, Any]:
+        n = s.approved + 1
+        return {"drafts": {n: screenplay.write_episode(gateway, s.run_id, screenplay_input(s, n))}}
 
-    def after_gate_3(s: RunState) -> Literal["screenplay", "__end__"]:
-        return "__end__" if s.script_approved else "screenplay"
+    def reconcile_node(s: RunState) -> dict[str, Any]:
+        """Record what the approved episode established, then hold every later draft to it."""
+        assert s.bible is not None and s.plan is not None
+        n = s.approved
+        script = s.drafts[n].script
+        last = n == len(s.plan.episodes)
+        record = story_architect.record(gateway, s.run_id, script, s.plan.episodes[n - 1], last)
+        bible = db.save_bible(conn, s.bible.model_copy(update={"episodes": [*s.bible.episodes, record]}))
+        db.save_script(conn, "pipeline", script)
+        later = s.model_copy(update={"bible": bible})
+        drafts = {
+            d.episode: screenplay.write_episode(gateway, s.run_id, screenplay_input(later, d.episode), previous=d)
+            for d in s.season()
+            if d.episode > n
+        }
+        return {"bible": bible, "drafts": drafts}
+
+    def after_gate_3(s: RunState) -> Literal["reconcile", "rewrite"]:
+        return "rewrite" if s.rejected else "reconcile"
+
+    def after_reconcile(s: RunState) -> Literal["gate_3", "__end__"]:
+        assert s.plan is not None
+        return "__end__" if s.approved == len(s.plan.episodes) else "gate_3"
 
     def after_architect(s: RunState) -> Literal["story_architect", "save_bible"]:
         return "story_architect" if s.scene_index < len(s.scenes) else "save_bible"
@@ -201,9 +223,10 @@ def build(conn: psycopg.Connection[Any], gateway: Gateway) -> StateGraph[RunStat
     g.add_node("beat_planner", beat_planner_node)
     g.add_node("gate_2", gate_2_node)
     g.add_node("cast", cast_node)
-    g.add_node("screenplay", screenplay_node)
-    g.add_node("validate", validate_node)
+    g.add_node("write_episode", write_episode_node)
     g.add_node("gate_3", gate_3_node)
+    g.add_node("rewrite", rewrite_node)
+    g.add_node("reconcile", reconcile_node)
     g.add_edge(START, "ingest")
     g.add_edge("ingest", "story_architect")
     g.add_conditional_edges("story_architect", after_architect)
@@ -211,10 +234,11 @@ def build(conn: psycopg.Connection[Any], gateway: Gateway) -> StateGraph[RunStat
     g.add_conditional_edges("gate_1", after_gate_1)
     g.add_edge("beat_planner", "gate_2")
     g.add_conditional_edges("gate_2", after_gate_2)
-    g.add_edge("cast", "screenplay")
-    g.add_edge("screenplay", "validate")
-    g.add_conditional_edges("validate", after_validate)
+    g.add_conditional_edges("cast", fan_out, ["write_episode"])
+    g.add_edge("write_episode", "gate_3")
     g.add_conditional_edges("gate_3", after_gate_3)
+    g.add_edge("rewrite", "gate_3")
+    g.add_conditional_edges("reconcile", after_reconcile)
     return g
 
 

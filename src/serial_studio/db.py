@@ -155,10 +155,15 @@ def save_season(conn: psycopg.Connection[Any], source: str, scripts: list[Script
         for story_id in {s.story_id for s in scripts}:
             conn.execute("DELETE FROM scripts WHERE story_id = %s AND source = %s", (story_id, source))
         for s in scripts:
-            conn.execute(
-                "INSERT INTO scripts (story_id, source, episode, script) VALUES (%s, %s, %s, %s)",
-                (s.story_id, source, s.episode, Jsonb(s.model_dump())),
-            )
+            save_script(conn, source, s)
+
+
+def save_script(conn: psycopg.Connection[Any], source: str, script: Script) -> None:
+    conn.execute(
+        "INSERT INTO scripts (story_id, source, episode, script) VALUES (%s, %s, %s, %s) "
+        "ON CONFLICT (story_id, source, episode) DO UPDATE SET script = EXCLUDED.script, created_at = now()",
+        (script.story_id, source, script.episode, Jsonb(script.model_dump())),
+    )
 
 
 def scripts(conn: psycopg.Connection[Any], story_id: str, source: str) -> list[Script]:

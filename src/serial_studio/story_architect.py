@@ -12,14 +12,19 @@ import re
 from serial_studio.gateway import Gateway, role_model, strict_schema
 from serial_studio.schemas import (
     ArchitectInput,
+    BeatSheet,
     Bible,
     BibleDelta,
     Character,
+    Cliffhanger,
     Clue,
+    EpisodeRecord,
+    EpisodeRecordDraft,
     Message,
     ModelRequest,
     OpenThread,
     Scene,
+    Script,
     SeasonPlan,
     SourcePosition,
 )
@@ -222,3 +227,67 @@ def cast(bible: Bible, plan: SeasonPlan) -> Bible:
         for cid in e.reveals:
             clues[cid].reveal_episode = e.episode
     return b
+
+
+# --- reconciliation after each approved script (gate 3) ---
+
+RECORD_SYSTEM = """You are the Story Architect for an audio serial adapted from a mystery short story.
+An editor has just approved this episode's script. Record what it established, for the writers of
+the episodes after it:
+- ending: the concrete event the episode ends on, as the listener hears it, with 2-4 lowercase
+  keywords copied from the script's closing lines; null for the last episode.
+- established: short statements of what the listener now knows.
+- differs_from_plan: each way the script departs from the planned beat sheet (a clue moved, a
+  secret told early, a different ending); empty if none."""
+
+RECORD_SCHEMA = strict_schema(EpisodeRecordDraft)
+CLOSING_WORDS = 60  # where the ending's keywords must be found
+
+
+def record(gateway: Gateway, run_id: str, script: Script, sheet: BeatSheet, last: bool) -> EpisodeRecord:
+    plan = {
+        "beats": [b.summary for b in sheet.beats],
+        "cliffhanger": sheet.cliffhanger.model_dump() if sheet.cliffhanger else None,
+    }
+    text = "\n".join(f"{line.speaker}: {line.text}" for line in script.lines)
+    response = gateway.complete(
+        ModelRequest(
+            run_id=run_id,
+            stage="judge",
+            node="story_architect",
+            model=role_model("judge"),
+            messages=[
+                Message(role="system", content=RECORD_SYSTEM),
+                Message(
+                    role="user",
+                    content=f"Episode {script.episode}{' (the last)' if last else ''}.\n"
+                    f"Plan:\n{json.dumps(plan, ensure_ascii=False)}\nApproved script:\n<<<\n{text}\n>>>",
+                ),
+            ],
+            params={"temperature": 0, "max_completion_tokens": 2000, "reasoning_effort": "low"},
+            prompt_version=PROMPT_VERSION,
+            response_schema=RECORD_SCHEMA,
+        )
+    )
+    d = EpisodeRecordDraft.model_validate_json(response.text)
+    differs = list(d.differs_from_plan)
+    ending = None if last else d.ending
+    if ending is not None:
+        # The next opening is checked against these words, so they must be ones the script really ends on.
+        closing = " ".join(w for line in script.lines for w in line.text.split())
+        closing = " ".join(closing.split()[-CLOSING_WORDS:]).lower()
+        kept = [k for k in ending.keywords if re.search(r"\b" + re.escape(k), closing)]
+        if len(kept) >= 2:
+            ending = Cliffhanger(event=ending.event, keywords=kept)
+        else:
+            differs.append(f"ending keywords {ending.keywords} are not in the closing lines; kept the plan's")
+            ending = sheet.cliffhanger
+    elif not last:
+        ending = sheet.cliffhanger
+    return EpisodeRecord(
+        episode=script.episode,
+        ending=ending,
+        established=d.established,
+        differs_from_plan=differs,
+        planted=sorted({s.clue_id for s in script.clue_spans}),
+    )
