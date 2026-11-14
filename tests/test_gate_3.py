@@ -18,7 +18,7 @@ from serial_studio.schemas import Script
 from serial_studio.screenplay import MAX_REVISIONS
 
 from .conftest import App, FakeNetwork
-from .test_gate_2 import answer, at_gate_2, decide, is_screenplay, recorded_plan
+from .test_gate_2 import answer, at_gate_2, critic_of, decide, is_screenplay, panel, recorded_plan
 
 FILLER = "The fog lay thick on Baker Street and the lamps burned low while the clock ticked on."
 NOTES = "Open on the knock at the bedroom door."
@@ -82,6 +82,7 @@ def is_record(body: dict[str, Any]) -> bool:
 def writer(
     drafts: dict[int, Make] | None = None,
     record: Callable[[dict[str, Any]], dict[str, Any]] = record_answer,
+    critics: Callable[[dict[str, Any]], dict[str, Any] | None] = panel,
 ) -> Callable[[dict[str, Any]], dict[str, Any] | None]:
     """Answer each episode's screenplay calls by take, and the Story Architect's records; the rest replays.
 
@@ -93,6 +94,8 @@ def writer(
     def respond(body: dict[str, Any]) -> dict[str, Any] | None:
         if is_record(body):
             return answer(record(body))
+        if critic_of(body):
+            return critics(body)
         if not is_screenplay(body):
             return None
         b = brief(body)

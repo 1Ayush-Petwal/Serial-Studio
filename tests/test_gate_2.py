@@ -45,9 +45,31 @@ def planner_calls(network: FakeNetwork) -> list[dict[str, Any]]:
     return [c for c in network.model_calls() if c["model"].startswith("gemini")]
 
 
-def answer(plan: dict[str, Any]) -> dict[str, Any]:
-    content = json.dumps(plan)
+def answer(plan: dict[str, Any] | str) -> dict[str, Any]:
+    content = plan if isinstance(plan, str) else json.dumps(plan)
     return {"choices": [{"message": {"content": content}}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+
+CRITICS = ("Tone critic", "Character critic", "Structure critic", "Ear critic", "Lead critic")
+PASSING_PANEL: dict[str, dict[str, Any]] = {
+    "Character critic": {"score": 4, "notes": ["The voices are distinct."], "guesses": []},
+    "Lead critic": {"notes": [{"critic": "tone", "note": "Keep the period voice.", "must_fix": False, "rank": 1}]},
+}
+
+
+def critic_of(body: dict[str, Any]) -> str | None:
+    """Which crew member a judge call comes from (CrewAI opens each system prompt with the role)."""
+    system = body["messages"][0]["content"]
+    return next((r for r in CRITICS if system.startswith(f"You are {r}.")), None)
+
+
+def panel(body: dict[str, Any], answers: dict[str, dict[str, Any]] | None = None) -> dict[str, Any] | None:
+    """A critic's final answer in CrewAI's format; scores 4, nothing must be fixed unless `answers` says so."""
+    role = critic_of(body)
+    if role is None:
+        return None
+    out = (answers or {}).get(role) or PASSING_PANEL.get(role) or {"score": 4, "notes": ["Works."]}
+    return answer(f"Thought: I now can give a great answer\nFinal Answer: {json.dumps(out)}")
 
 
 def recorded_plan(network: FakeNetwork) -> dict[str, Any]:
@@ -101,7 +123,7 @@ def test_gate_2_approve_writes_casting_and_clue_episodes_into_a_new_bible_versio
     status = at_gate_2(app)
     plan = plan_of(status)
 
-    network.override = lambda body: answer(TINY_SCRIPT) if is_screenplay(body) else None
+    network.override = lambda body: answer(TINY_SCRIPT) if is_screenplay(body) else panel(body)
     done = decide(app, status, "approve")
 
     assert done.gate.gate == 3, "an approved plan goes on to the Screenplay agent"
@@ -128,6 +150,8 @@ def test_gate_2_reject_reruns_the_beat_planner_with_the_notes(
     def respond(body: dict[str, Any]) -> dict[str, Any] | None:
         if is_screenplay(body):
             return answer(TINY_SCRIPT)
+        if critic_of(body):
+            return panel(body)
         return answer(recorded) if PLAN_NOTES in json.dumps(body) else None
 
     network.override = respond
