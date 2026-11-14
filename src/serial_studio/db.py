@@ -8,7 +8,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from serial_studio.schemas import Bible, CostLine, Decision, Script, Story
+from serial_studio.schemas import Bible, CostLine, Decision, Script, SeasonPlan, Story
 
 DDL = """
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -52,6 +52,38 @@ CREATE TABLE IF NOT EXISTS scripts (
     script jsonb NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (story_id, source, episode)
+);
+-- First drafts and hand-adapted references join the gold set (#10).
+ALTER TABLE scripts DROP CONSTRAINT IF EXISTS scripts_source_check;
+ALTER TABLE scripts ADD CONSTRAINT scripts_source_check
+    CHECK (source IN ('pipeline', 'draft', 'baseline', 'reference'));
+CREATE TABLE IF NOT EXISTS plans (
+    story_id text NOT NULL REFERENCES stories(id),
+    version int NOT NULL,
+    plan jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (story_id, version)
+);
+-- The gold set: one story's scripts, shuffled; the editor sees only the position.
+CREATE TABLE IF NOT EXISTS gold (
+    story_id text NOT NULL REFERENCES stories(id),
+    position int NOT NULL,
+    item jsonb NOT NULL,
+    PRIMARY KEY (story_id, position)
+);
+CREATE TABLE IF NOT EXISTS gold_scores (
+    story_id text NOT NULL,
+    position int NOT NULL,
+    dimension text NOT NULL,
+    score int NOT NULL CHECK (score BETWEEN 1 AND 5),
+    PRIMARY KEY (story_id, position, dimension)
+);
+CREATE TABLE IF NOT EXISTS calibrations (
+    id bigserial PRIMARY KEY,
+    story_id text NOT NULL,
+    prompt_version text NOT NULL,
+    calibration jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE TABLE IF NOT EXISTS decisions (
     id bigserial PRIMARY KEY,
@@ -164,6 +196,22 @@ def save_script(conn: psycopg.Connection[Any], source: str, script: Script) -> N
         "ON CONFLICT (story_id, source, episode) DO UPDATE SET script = EXCLUDED.script, created_at = now()",
         (script.story_id, source, script.episode, Jsonb(script.model_dump())),
     )
+
+
+def save_plan(conn: psycopg.Connection[Any], plan: SeasonPlan) -> None:
+    conn.execute(
+        "INSERT INTO plans (story_id, version, plan) VALUES (%s, %s, %s) "
+        "ON CONFLICT (story_id, version) DO UPDATE SET plan = EXCLUDED.plan",
+        (plan.story_id, plan.version, Jsonb(plan.model_dump())),
+    )
+
+
+def plan(conn: psycopg.Connection[Any], story_id: str) -> SeasonPlan | None:
+    """The latest approved season plan."""
+    row = conn.execute(
+        "SELECT plan FROM plans WHERE story_id = %s ORDER BY created_at DESC, version DESC LIMIT 1", (story_id,)
+    ).fetchone()
+    return SeasonPlan.model_validate(row["plan"]) if row else None
 
 
 def scripts(conn: psycopg.Connection[Any], story_id: str, source: str) -> list[Script]:

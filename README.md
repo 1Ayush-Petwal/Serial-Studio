@@ -57,6 +57,21 @@ ranks the notes and marks must-fix ones. Until calibration (#10) scores never ga
 send a script back, sharing the 2-revision budget with the validators. Gate 3 shows the report card:
 scores per critic and every revision with its reason. CrewAI telemetry and trace upload are off.
 
+Calibration (decision 26), once a season has run for one story:
+
+```sh
+uv run serial-studio baseline "The Speckled Band" --book 1661
+uv run serial-studio gold-build the-speckled-band --reference ref1.json --reference ref2.json
+uv run serial-studio gold-score the-speckled-band    # blind, shuffled; 1-5 per dimension; resumable
+uv run serial-studio calibrate the-speckled-band     # pass marks + Spearman + % within 1 point
+```
+
+The gold set is up to 6 finals, 6 first drafts (kept as `source = 'draft'`), 6 baseline episodes and the
+hand-adapted references (JSON: `title`, `blurb`, `lines` of `speaker`/`text`). Each critic's pass mark is
+the cut on its score that best separates the editor's >= 4 from <= 2. After `calibrate`, a score under
+its pass mark is a must-fix note. Re-run `calibrate` after a critique prompt change: each prompt version
+is kept, so agreement can be compared.
+
 Models come from `src/serial_studio/models.toml` (`[roles]`), overridable with
 `JUDGE_MODEL=provider:model` / `WRITER_MODEL=provider:model`. The writer (Gemini) needs a key from
 an AI Studio project without prepaid billing, or calls fail with 402.

@@ -21,10 +21,10 @@ import httpx
 from dotenv import load_dotenv
 from langfuse import Langfuse
 
-from serial_studio import db
+from serial_studio import calibration, db
 from serial_studio.graph import Runner
 from serial_studio.ingest import slug
-from serial_studio.schemas import Bible, Decision, RunStatus, Script, SeasonPlan, StartRun
+from serial_studio.schemas import Bible, Decision, RunStatus, Script, ScriptDraft, SeasonPlan, StartRun
 
 
 def show(status: RunStatus, episode: int | None = None) -> None:
@@ -119,7 +119,24 @@ def main(argv: list[str] | None = None) -> None:
     rej.add_argument("run_id")
     rej.add_argument("--notes", required=True)
     sub.add_parser("export-recordings").add_argument("path")
+    build = sub.add_parser("gold-build", help="shuffle finals, first drafts, baseline and references into the gold set")
+    build.add_argument("story_id")
+    build.add_argument("--reference", action="append", default=[], help="hand-adapted script JSON: title, blurb, lines")
+    sub.add_parser("gold-score", help="score the gold set blind, 1-5 per dimension").add_argument("story_id")
+    sub.add_parser("calibrate", help="critic thresholds and agreement from the gold scores").add_argument("story_id")
     args = p.parse_args(argv)
+
+    if args.cmd in ("gold-build", "gold-score"):
+        conn = db.connect(os.environ["DATABASE_URL"])
+        db.setup(conn)
+        if args.cmd == "gold-build":
+            refs = [_reference(args.story_id, i, path) for i, path in enumerate(args.reference, 1)]
+            items = calibration.build(conn, args.story_id, refs)
+            print(f"gold set for {args.story_id}: {len(items)} items, shuffled")
+        else:
+            n = calibration.score(conn, args.story_id, ask=input, say=print)
+            print(f"{n} scores stored")
+        return
 
     if args.cmd == "export-recordings":
         conn = db.connect(os.environ["DATABASE_URL"])
@@ -134,6 +151,15 @@ def main(argv: list[str] | None = None) -> None:
     http = httpx.Client(timeout=httpx.Timeout(900, connect=30), follow_redirects=True)
     runner = Runner(os.environ["DATABASE_URL"], http, langfuse)
     try:
+        if args.cmd == "calibrate":
+            cal = calibration.calibrate(runner.gateway, runner.conn, f"calibrate-{args.story_id}", args.story_id)
+            for old in calibration.history(runner.conn)[:-1]:
+                print(f"prompt {old.prompt_version}: spearman {old.spearman}")
+            print(f"prompt {cal.prompt_version}, {cal.items} items")
+            for c, t in cal.thresholds.items():
+                print(f"  {c}: pass mark {t:g}, spearman {cal.spearman[c]}, within 1 point {cal.within_one[c]:.0%}")
+            print("critics now gate: a score under its pass mark is a must-fix note")
+            return
         if args.cmd == "baseline":
             run_id = runner.baseline(StartRun(title=args.title, book_id=args.book))
             for sc in db.scripts(runner.conn, slug(args.title), "baseline"):
@@ -155,6 +181,21 @@ def main(argv: list[str] | None = None) -> None:
     finally:
         langfuse.flush()
         runner.close()
+
+
+def _reference(story_id: str, episode: int, path: str) -> Script:
+    with open(path, encoding="utf-8") as f:
+        d = ScriptDraft.model_validate_json(f.read())
+    return Script(
+        story_id=story_id,
+        episode=episode,
+        bible_version=None,
+        title=d.title,
+        blurb=d.blurb,
+        lines=d.lines,
+        clue_spans=[],
+        cues=[],
+    )
 
 
 def _decision(status: RunStatus, args: Any) -> Decision:
