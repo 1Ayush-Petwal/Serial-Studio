@@ -7,14 +7,15 @@ validator rule gets a failing and a passing case without a model call.
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Callable
 from typing import Any
 
 import pytest
 
-from serial_studio import db, screenplay
-from serial_studio.graph import MAX_REVISIONS
+from serial_studio import db, screenplay, story_architect
 from serial_studio.schemas import Script
+from serial_studio.screenplay import MAX_REVISIONS
 
 from .conftest import App, FakeNetwork
 from .test_gate_2 import answer, at_gate_2, decide, is_screenplay, recorded_plan
@@ -30,9 +31,15 @@ def brief(body: dict[str, Any]) -> dict[str, Any]:
 
 
 def good_draft(b: dict[str, Any], words: int = 250) -> dict[str, Any]:
-    """A script that passes every rule: each planned clue marked with its keywords, cast speakers only."""
+    """A script that passes every rule: recap and seam, each planned clue with its keywords, cast speakers."""
     cast = b["cast"]
-    lines = [{"speaker": "narrator", "text": "[bed:rain] A knock at dawn, and a veiled woman trembling at the door."}]
+    prev = b["previous_cliffhanger"]
+    opening = (
+        f"{b['recap']} Then came the {' '.join(prev['keywords'])}."
+        if prev
+        else "[bed:rain] A knock at dawn, and a veiled woman trembling at the door."
+    )
+    lines = [{"speaker": "narrator", "text": opening}]
     lines += [
         {"speaker": "narrator", "text": f"[clue:{c['id']}] Holmes notes the {' '.join(c['keywords'])} at once. [/clue]"}
         for c in b["clues_to_plant"]
@@ -43,25 +50,61 @@ def good_draft(b: dict[str, Any], words: int = 250) -> dict[str, Any]:
     while count + len(FILLER.split()) <= words - 10:
         lines.insert(-2, {"speaker": "narrator", "text": FILLER})
         count += len(FILLER.split())
-    lines.append({"speaker": "narrator", "text": "[sting] Then, in the dark, a low clear whistle."})
+    end = b["cliffhanger"]
+    closing = f"[sting] Then, in the dark: {' '.join(end['keywords'])}." if end else "[sting] And so it ended."
+    lines.append({"speaker": "narrator", "text": closing})
     return {"title": b["title"], "blurb": "A frightened client brings Holmes a deadly puzzle.", "lines": lines}
 
 
-def writer(*drafts: Callable[[dict[str, Any]], dict[str, Any]]) -> Callable[[dict[str, Any]], dict[str, Any] | None]:
-    """Answer screenplay calls in turn (the last one repeats); leave every other call to the recordings."""
-    queue = list(drafts)
+Make = Callable[[dict[str, Any], int], dict[str, Any]]  # (episode brief, take) -> writer answer
+
+
+def good(b: dict[str, Any], take: int) -> dict[str, Any]:
+    return good_draft(b)
+
+
+def then_good(bad: Callable[[dict[str, Any]], dict[str, Any]]) -> Make:
+    return lambda b, take: bad(b) if take == 0 else good_draft(b)
+
+
+def record_answer(body: dict[str, Any]) -> dict[str, Any]:
+    """The Story Architect's record of an approved script: it ended where the plan said."""
+    user = body["messages"][1]["content"]
+    plan = json.loads(user.split("Plan:\n", 1)[1].split("\n", 1)[0])
+    return {"ending": plan["cliffhanger"], "established": ["Holmes has taken the case."], "differs_from_plan": []}
+
+
+def is_record(body: dict[str, Any]) -> bool:
+    return bool(body["messages"][0]["content"] == story_architect.RECORD_SYSTEM)
+
+
+def writer(
+    drafts: dict[int, Make] | None = None,
+    record: Callable[[dict[str, Any]], dict[str, Any]] = record_answer,
+) -> Callable[[dict[str, Any]], dict[str, Any] | None]:
+    """Answer each episode's screenplay calls by take, and the Story Architect's records; the rest replays.
+
+    Episodes draft in parallel, so answers are keyed by episode, never by call order.
+    """
+    takes: dict[int, int] = {}
+    lock = threading.Lock()
 
     def respond(body: dict[str, Any]) -> dict[str, Any] | None:
+        if is_record(body):
+            return answer(record(body))
         if not is_screenplay(body):
             return None
-        make = queue.pop(0) if len(queue) > 1 else queue[0]
-        return answer(make(brief(body)))
+        b = brief(body)
+        with lock:
+            take = takes.get(b["episode"], 0)
+            takes[b["episode"]] = take + 1
+        return answer((drafts or {}).get(b["episode"], good)(b, take))
 
     return respond
 
 
-def screenplay_calls(network: FakeNetwork) -> list[dict[str, Any]]:
-    return [c for c in network.model_calls() if is_screenplay(c)]
+def screenplay_calls(network: FakeNetwork, episode: int = 1) -> list[dict[str, Any]]:
+    return [c for c in network.model_calls() if is_screenplay(c) and brief(c)["episode"] == episode]
 
 
 def at_gate_3(app: App) -> Any:
@@ -75,7 +118,7 @@ def script_of(status: Any) -> Script:
 def test_approved_plan_leads_to_an_episode_1_script_at_gate_3(
     make_app: Callable[..., App], network: FakeNetwork
 ) -> None:
-    network.override = writer(good_draft)
+    network.override = writer()
     app = make_app()
 
     status = at_gate_3(app)
@@ -93,8 +136,8 @@ def test_approved_plan_leads_to_an_episode_1_script_at_gate_3(
     assert [c.kind for c in script.cues] == ["foley", "sting"]
     assert any("[clue:" in line for line in p["markup"])
 
-    done = decide(app, status, "approve")
-    assert done.state == "done"
+    after = decide(app, status, "approve")
+    assert after.gate.target == "script:the-speckled-band:ep2:v1"
     assert db.scripts(app.conn, "the-speckled-band", "pipeline") == [script]
 
 
@@ -169,7 +212,7 @@ def test_each_rule_sends_a_breaking_script_back_with_a_targeted_note_and_passes_
         breaks(d, network)
         return d
 
-    network.override = writer(bad, good_draft)
+    network.override = writer({1: then_good(bad)})
     status = at_gate_3(make_app())
 
     first, revision = screenplay_calls(network)
@@ -185,7 +228,7 @@ def test_a_speaker_without_a_voice_goes_back(make_app: Callable[..., App], netwo
         d["lines"].insert(2, {"speaker": silent[0], "text": "Indeed."})
         return d
 
-    network.override = writer(unvoiced, good_draft)
+    network.override = writer({1: then_good(unvoiced)})
     at_gate_3(make_app())
 
     assert "has no voice" in screenplay_calls(network)[1]["messages"][-1]["content"]
@@ -198,7 +241,7 @@ def test_a_misspelled_name_is_fixed_without_a_revision(make_app: Callable[..., A
         d["lines"][0]["text"] += " Holms looks up."
         return d
 
-    network.override = writer(typos)
+    network.override = writer({1: lambda b, take: typos(b)})
     status = at_gate_3(make_app())
 
     assert len(screenplay_calls(network)) == 1
@@ -213,10 +256,8 @@ def test_a_script_still_over_110_seconds_after_2_revisions_reaches_gate_3_flagge
     make_app: Callable[..., App], network: FakeNetwork
 ) -> None:
     # Three different over-long drafts: an identical revision request would be answered from the cache.
-    def long(take: int) -> Callable[[dict[str, Any]], dict[str, Any]]:
-        return lambda b: good_draft(b, words=295) | {"title": f"Take {take}"}
-
-    network.override = writer(long(1), long(2), long(3))
+    # Each take differs: an identical revision request would be answered from the cache.
+    network.override = writer({1: lambda b, take: good_draft(b, words=295) | {"title": f"Take {take}"}})
     status = at_gate_3(make_app())
 
     assert len(screenplay_calls(network)) == 1 + MAX_REVISIONS
@@ -229,7 +270,7 @@ def test_a_script_still_over_110_seconds_after_2_revisions_reaches_gate_3_flagge
 def test_gate_3_reject_reruns_the_screenplay_agent_with_the_notes(
     make_app: Callable[..., App], network: FakeNetwork
 ) -> None:
-    network.override = writer(good_draft)
+    network.override = writer()
     app = make_app()
     first = at_gate_3(app)
 
@@ -243,7 +284,7 @@ def test_gate_3_reject_reruns_the_screenplay_agent_with_the_notes(
 def test_a_writer_that_never_returns_a_parseable_script_fails_loudly(
     make_app: Callable[..., App], network: FakeNetwork
 ) -> None:
-    network.override = writer(lambda b: {"title": "Take", "blurb": str(len(network.requests)), "lines": []})
+    network.override = writer({1: lambda b, take: {"title": "Take", "blurb": str(take), "lines": []}})
 
     with pytest.raises(ValueError, match="unparseable"):
         at_gate_3(make_app())

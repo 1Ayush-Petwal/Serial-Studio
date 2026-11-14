@@ -1,7 +1,7 @@
 """CLI: start runs and decide gates.
 
 serial-studio run "The Speckled Band" --book 1661
-serial-studio show RUN_ID
+serial-studio show RUN_ID [--episode N]
 serial-studio approve RUN_ID           # gates 1-3
 serial-studio reject RUN_ID --notes "..."
 serial-studio resume RUN_ID            # continue a crashed run
@@ -27,7 +27,7 @@ from serial_studio.ingest import slug
 from serial_studio.schemas import Bible, Decision, RunStatus, Script, SeasonPlan, StartRun
 
 
-def show(status: RunStatus) -> None:
+def show(status: RunStatus, episode: int | None = None) -> None:
     print(f"run {status.run_id}: {status.state}")
     if status.gate is None:
         return
@@ -77,7 +77,13 @@ def show(status: RunStatus) -> None:
         for name, voice in plan.casting.items():
             print(f"  {name}: {voice}")
     elif status.gate.gate == 3:
-        g3 = status.gate.payload
+        season = status.gate.payload["season"]
+        print("SEASON  (read any episode with --episode N; approve in order)")
+        for x in season:
+            state = "approved" if x["approved"] else f"{len(x['violations'])} violation(s)"
+            print(f"  ep {x['episode']}: {x['script']['title']}  - {state}")
+        print()
+        g3 = next(x for x in season if x["episode"] == episode) if episode else status.gate.payload
         script = Script.model_validate(g3["script"])
         words = sum(len(line.text.split()) for line in script.lines)
         print(f"EPISODE {script.episode}: {script.title}  (bible v{script.bible_version})\n  {script.blurb}")
@@ -100,6 +106,7 @@ def main(argv: list[str] | None = None) -> None:
         run.add_argument("--book", type=int, required=True, help="Gutenberg book id containing the story")
     for name in ("show", "approve", "resume"):
         sub.add_parser(name).add_argument("run_id")
+    sub.choices["show"].add_argument("--episode", type=int, help="gate 3: read this episode's draft")
     rej = sub.add_parser("reject")
     rej.add_argument("run_id")
     rej.add_argument("--notes", required=True)
@@ -136,7 +143,7 @@ def main(argv: list[str] | None = None) -> None:
             status = runner.resume(args.run_id)
         else:
             status = runner.decide(_decision(runner.status(args.run_id), args))
-        show(status)
+        show(status, getattr(args, "episode", None))
     finally:
         langfuse.flush()
         runner.close()

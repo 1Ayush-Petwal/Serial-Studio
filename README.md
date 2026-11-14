@@ -44,6 +44,13 @@ clue marked once with all its keywords inside the span, no clue before its plann
 in the bible and cast, well-formed markers (1 sting, <= 3 Foley). Misspelled names are fixed in code;
 anything else goes back as a note, at most 2 revisions, then gate 3 shows what is still broken.
 
+The whole season drafts in parallel (one LangGraph `Send` branch per episode). Episode 2 on must open
+with a narrator recap and say the previous ending's keywords in the first 60 words. Gate 3 shows every
+draft (`show RUN_ID --episode N`) but approves only the next episode in order. Each approval has the
+Story Architect record what the episode established - the ending it actually reached, facts, departures
+from the plan - as a new bible version; later drafts are re-validated against it, and any that now
+break (say, a seam after a changed ending) go back to the Screenplay agent before the editor sees them.
+
 Models come from `src/serial_studio/models.toml` (`[roles]`), overridable with
 `JUDGE_MODEL=provider:model` / `WRITER_MODEL=provider:model`. The writer (Gemini) needs a key from
 an AI Studio project without prepaid billing, or calls fail with 402.
