@@ -238,3 +238,13 @@ def test_gate_3_reject_reruns_the_screenplay_agent_with_the_notes(
     assert second.gate.target == "script:the-speckled-band:ep1:v2"
     [_, rerun] = screenplay_calls(network)
     assert NOTES in rerun["messages"][1]["content"] and len(rerun["messages"]) == 2
+
+
+def test_a_writer_that_never_returns_a_parseable_script_fails_loudly(
+    make_app: Callable[..., App], network: FakeNetwork
+) -> None:
+    network.override = writer(lambda b: {"title": "Take", "blurb": str(len(network.requests)), "lines": []})
+
+    with pytest.raises(ValueError, match="unparseable"):
+        at_gate_3(make_app())
+    assert len(screenplay_calls(network)) == 1 + MAX_REVISIONS

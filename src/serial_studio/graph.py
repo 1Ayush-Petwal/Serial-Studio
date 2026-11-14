@@ -148,6 +148,8 @@ def build(conn: psycopg.Connection[Any], gateway: Gateway) -> StateGraph[RunStat
     def validate_node(s: RunState) -> dict[str, Any]:
         assert s.draft is not None
         script, violations, fixes = screenplay.draft(s.draft, screenplay_input(s))
+        if script is None and s.revisions == MAX_REVISIONS:
+            raise ValueError(f"episode {s.episode}: writer returned unparseable scripts: {violations}")
         return {"script": script, "violations": violations, "fixes": fixes}
 
     def gate_3_node(s: RunState) -> dict[str, Any]:
@@ -174,7 +176,7 @@ def build(conn: psycopg.Connection[Any], gateway: Gateway) -> StateGraph[RunStat
         return {"script_notes": notes, "script_version": version, "draft": None, "violations": [], "revisions": 0}
 
     def after_validate(s: RunState) -> Literal["screenplay", "gate_3"]:
-        # A script that cannot be parsed has nothing to show the editor, so it always goes back.
+        # A script that cannot be parsed has nothing to show the editor, so it goes back until validate fails loudly.
         if s.violations and (s.script is None or s.revisions < MAX_REVISIONS):
             return "screenplay"
         return "gate_3"
