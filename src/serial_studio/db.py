@@ -1,4 +1,4 @@
-"""Postgres store: model cache, cost lines, stories, bible versions, decision rows."""
+"""Postgres store: model cache, cost lines, stories, bible versions, scripts, decision rows."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from serial_studio.schemas import Bible, CostLine, Decision, Story
+from serial_studio.schemas import Bible, CostLine, Decision, Script, Story
 
 DDL = """
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -43,6 +43,15 @@ CREATE TABLE IF NOT EXISTS bibles (
     bible jsonb NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (story_id, version)
+);
+-- source labels a script for blind evaluation; it never goes inside the script a judge reads.
+CREATE TABLE IF NOT EXISTS scripts (
+    story_id text NOT NULL REFERENCES stories(id),
+    source text NOT NULL CHECK (source IN ('pipeline', 'baseline')),
+    episode int NOT NULL,
+    script jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (story_id, source, episode)
 );
 CREATE TABLE IF NOT EXISTS decisions (
     id bigserial PRIMARY KEY,
@@ -138,6 +147,25 @@ def save_bible(conn: psycopg.Connection[Any], bible: Bible) -> Bible:
 def bible_versions(conn: psycopg.Connection[Any], story_id: str) -> list[Bible]:
     rows = conn.execute("SELECT bible FROM bibles WHERE story_id = %s ORDER BY version", (story_id,))
     return [Bible.model_validate(r["bible"]) for r in rows]
+
+
+def save_season(conn: psycopg.Connection[Any], source: str, scripts: list[Script]) -> None:
+    """Replace the story's season from this source (a new season may have fewer episodes)."""
+    with conn.transaction():
+        for story_id in {s.story_id for s in scripts}:
+            conn.execute("DELETE FROM scripts WHERE story_id = %s AND source = %s", (story_id, source))
+        for s in scripts:
+            conn.execute(
+                "INSERT INTO scripts (story_id, source, episode, script) VALUES (%s, %s, %s, %s)",
+                (s.story_id, source, s.episode, Jsonb(s.model_dump())),
+            )
+
+
+def scripts(conn: psycopg.Connection[Any], story_id: str, source: str) -> list[Script]:
+    rows = conn.execute(
+        "SELECT script FROM scripts WHERE story_id = %s AND source = %s ORDER BY episode", (story_id, source)
+    )
+    return [Script.model_validate(r["script"]) for r in rows]
 
 
 # --- decision rows ---

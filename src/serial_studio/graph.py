@@ -20,7 +20,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 from pydantic import BaseModel
 
-from serial_studio import beat_planner, db, schemas, story_architect
+from serial_studio import baseline, beat_planner, db, schemas, story_architect
 from serial_studio.gateway import Gateway
 from serial_studio.ingest import ingest, scenes
 from serial_studio.schemas import (
@@ -176,6 +176,14 @@ class Runner:
         run_id = uuid.uuid4().hex[:12]
         self.graph.invoke(RunState(run_id=run_id, start=start), self._config(run_id))
         return self.status(run_id)
+
+    def baseline(self, start: StartRun) -> str:
+        """Single-prompt season for the A/B test; outside the graph, since it has no gates."""
+        run_id = "baseline-" + uuid.uuid4().hex[:12]
+        story = ingest(self.gateway, start)
+        db.save_story(self.conn, story)
+        db.save_season(self.conn, "baseline", baseline.generate(self.gateway, run_id, story))
+        return run_id
 
     def status(self, run_id: str) -> RunStatus:
         snap = self.graph.get_state(self._config(run_id))

@@ -322,12 +322,22 @@ class ScriptLine(Schema):
 class Script(Schema):
     story_id: NonEmpty
     episode: int
-    bible_version: int
+    bible_version: int | None  # None for the baseline, which reads no bible
     title: NonEmpty
     blurb: NonEmpty
     lines: list[ScriptLine]
     clue_spans: list[ClueSpan]
     cues: list[CueMarker]
+
+
+class BaselineEpisode(Schema):
+    title: NonEmpty
+    blurb: NonEmpty
+    lines: list[ScriptLine] = Field(min_length=1)
+
+
+class BaselineDraft(Schema):
+    episodes: list[BaselineEpisode] = Field(min_length=5, max_length=7)
 
 
 class Violation(Schema):

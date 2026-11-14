@@ -5,6 +5,7 @@ serial-studio show RUN_ID
 serial-studio approve RUN_ID
 serial-studio reject RUN_ID --notes "..."
 serial-studio resume RUN_ID            # continue a crashed run
+serial-studio baseline "The Speckled Band" --book 1661   # single-prompt season for the A/B test
 serial-studio export-recordings PATH   # model cache -> test fixture
 """
 
@@ -22,6 +23,7 @@ from langfuse import Langfuse
 
 from serial_studio import db
 from serial_studio.graph import Runner
+from serial_studio.ingest import slug
 from serial_studio.schemas import Bible, Decision, RunStatus, SeasonPlan, StartRun
 
 
@@ -80,9 +82,10 @@ def main(argv: list[str] | None = None) -> None:
     load_dotenv()
     p = argparse.ArgumentParser(prog="serial-studio")
     sub = p.add_subparsers(dest="cmd", required=True)
-    run = sub.add_parser("run")
-    run.add_argument("title")
-    run.add_argument("--book", type=int, required=True, help="Gutenberg book id containing the story")
+    for name in ("run", "baseline"):
+        run = sub.add_parser(name)
+        run.add_argument("title")
+        run.add_argument("--book", type=int, required=True, help="Gutenberg book id containing the story")
     for name in ("show", "approve", "resume"):
         sub.add_parser(name).add_argument("run_id")
     rej = sub.add_parser("reject")
@@ -104,6 +107,15 @@ def main(argv: list[str] | None = None) -> None:
     http = httpx.Client(timeout=httpx.Timeout(900, connect=30), follow_redirects=True)
     runner = Runner(os.environ["DATABASE_URL"], http, langfuse)
     try:
+        if args.cmd == "baseline":
+            run_id = runner.baseline(StartRun(title=args.title, book_id=args.book))
+            for sc in db.scripts(runner.conn, slug(args.title), "baseline"):
+                words = sum(len(line.text.split()) for line in sc.lines)
+                print(f"EPISODE {sc.episode}: {sc.title}  ({words} words)\n  {sc.blurb}")
+                for line in sc.lines:
+                    print(f"  {line.speaker}: {line.text}")
+            print(f"run {run_id}: baseline stored")
+            return
         if args.cmd == "run":
             status = runner.start(StartRun(title=args.title, book_id=args.book))
         elif args.cmd == "show":
