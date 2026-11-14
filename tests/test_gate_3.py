@@ -248,3 +248,39 @@ def test_a_writer_that_never_returns_a_parseable_script_fails_loudly(
     with pytest.raises(ValueError, match="unparseable"):
         at_gate_3(make_app())
     assert len(screenplay_calls(network)) == 1 + MAX_REVISIONS
+
+
+def test_punctuation_after_a_marker_stays_on_its_word(make_app: Callable[..., App], network: FakeNetwork) -> None:
+    def tight(b: dict[str, Any]) -> dict[str, Any]:
+        d = good_draft(b)
+        c = b["clues_to_plant"][0]
+        d["lines"][1]["text"] = f"Holmes notes the [clue:{c['id']}]{' '.join(c['keywords'])}[/clue]."
+        return d
+
+    network.override = writer(tight)
+    status = at_gate_3(make_app())
+
+    line = script_of(status).lines[1].text
+    assert line.endswith(".") and " ." not in line
+    span = script_of(status).clue_spans[0]
+    assert span.end - span.start == len(b_keywords(network))
+
+
+def b_keywords(network: FakeNetwork) -> list[str]:
+    first = brief(screenplay_calls(network)[0])["clues_to_plant"][0]
+    return " ".join(first["keywords"]).split()
+
+
+def test_the_recorded_writer_answer_reaches_gate_3_clean(make_app: Callable[..., App], network: FakeNetwork) -> None:
+    """A real Gemini episode 1 (replayed): it passes the validators, at most after one revision."""
+    app = make_app()
+    status = at_gate_3(app)
+
+    p = status.gate.payload
+    assert p["violations"] == [] and p["revisions"] <= 1
+    assert p["predicted_seconds"] <= screenplay.MAX_SECONDS
+    script = script_of(status)
+    assert {s.clue_id for s in script.clue_spans} == {
+        cid for b in recorded_plan(network)["episodes"][0]["beats"] for cid in b["clue_ids"]
+    }
+    assert [line.speaker for line in script.lines if line.speaker != "narrator"]

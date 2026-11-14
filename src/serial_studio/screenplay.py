@@ -147,6 +147,8 @@ def parse(draft: ScriptDraft, inp: ScreenplayInput) -> tuple[Script, list[Violat
         pos = 0
         for m in [*MARKER.finditer(line.text), None]:
             chunk = line.text[pos : m.start() if m else len(line.text)].split()
+            if pos and chunk and spoken and not re.search(r"\w", chunk[0]):
+                spoken[-1] += chunk.pop(0)  # "glove[/clue]." - punctuation after a marker is not a word
             spoken += chunk
             n += len(chunk)
             if m is None:
