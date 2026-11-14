@@ -56,7 +56,8 @@ def good_draft(b: dict[str, Any], words: int = 250) -> dict[str, Any]:
     return {"title": b["title"], "blurb": "A frightened client brings Holmes a deadly puzzle.", "lines": lines}
 
 
-Make = Callable[[dict[str, Any], int], dict[str, Any]]  # (episode brief, take) -> writer answer
+# (episode brief, take) -> writer answer, or None to replay the recorded one
+Make = Callable[[dict[str, Any], int], dict[str, Any] | None]
 
 
 def good(b: dict[str, Any], take: int) -> dict[str, Any]:
@@ -98,7 +99,8 @@ def writer(
         with lock:
             take = takes.get(b["episode"], 0)
             takes[b["episode"]] = take + 1
-        return answer((drafts or {}).get(b["episode"], good)(b, take))
+        out = (drafts or {}).get(b["episode"], good)(b, take)
+        return None if out is None else answer(out)
 
     return respond
 
@@ -298,7 +300,7 @@ def test_punctuation_after_a_marker_stays_on_its_word(make_app: Callable[..., Ap
         d["lines"][1]["text"] = f"Holmes notes the [clue:{c['id']}]{' '.join(c['keywords'])}[/clue]."
         return d
 
-    network.override = writer(tight)
+    network.override = writer({1: lambda b, take: tight(b)})
     status = at_gate_3(make_app())
 
     line = script_of(status).lines[1].text
@@ -314,6 +316,7 @@ def b_keywords(network: FakeNetwork) -> list[str]:
 
 def test_the_recorded_writer_answer_reaches_gate_3_clean(make_app: Callable[..., App], network: FakeNetwork) -> None:
     """A real Gemini episode 1 (replayed): it passes the validators, at most after one revision."""
+    network.override = writer({1: lambda b, take: None})  # episode 1 replays; the others are canned
     app = make_app()
     status = at_gate_3(app)
 
